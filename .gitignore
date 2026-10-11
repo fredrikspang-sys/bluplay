@@ -1,0 +1,16 @@
+# build output
+/bluplay
+/bluplay-san
+*.o
+*.dSYM/
+*-san
+*-asan
+*-ubsan
+# python
+__pycache__/
+*.pyc
+# backups / editor files
+*.bak*
+*~
+*.swp
+.DS_Store
