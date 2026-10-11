@@ -6,6 +6,8 @@ bluplay is a small, dependency-free C program that talks to a BluOS player (Blue
 HTTP API on your LAN. It is aimed at people who keep their music as files on a NAS or network share that
 the player indexes, and who want to pick albums and tracks from a keyboard-driven terminal UI.
 
+**Platforms:** Linux and macOS (any POSIX system with a C99 compiler and a UTF-8 terminal). Tested on Slackware Linux 15.0. Windows is not supported natively; use WSL.
+
 ## Screenshot
 
 ![bluplay library and queue](docs/screenshot.png)
