@@ -40,12 +40,29 @@ the player indexes, and who want to pick albums and tracks from a keyboard-drive
 bluplay draws the UI itself with termios and standard ANSI/VT100 escape sequences, so it does **not** need
 ncurses or any other library.
 
+## Install
+
+Every [GitHub release](https://github.com/fredrikspang-sys/bluplay/releases) has ready-made x86_64 packages
+and a `SHA256SUMS` file (check with `sha256sum -c --ignore-missing SHA256SUMS`). Replace `VER` with the
+version, e.g. `0.1.1`. The prebuilt binaries only need glibc; release 0.1.1 needs glibc 2.33 or newer (Slackware 15,
+Debian 12, Ubuntu 22.04, Fedora 34 or later); otherwise build from source (below).
+
+| Format | Install |
+|---|---|
+| Slackware 15 (`bluplay-VER-x86_64-1_SBo.txz`) | `installpkg bluplay-VER-x86_64-1_SBo.txz` (as root; remove with `removepkg bluplay`) |
+| Slackware, built from source | the SlackBuild in [`slackbuild/bluplay/`](slackbuild/bluplay): put `bluplay-VER.tar.gz` next to it, run `./bluplay.SlackBuild` as root, then `installpkg /tmp/bluplay-VER-*.txz` |
+| Debian / Ubuntu (`bluplay_VER-1_amd64.deb`) | `sudo apt install ./bluplay_VER-1_amd64.deb` |
+| Fedora / RHEL / openSUSE (`bluplay-VER-1.x86_64.rpm`) | `sudo dnf install ./bluplay-VER-1.x86_64.rpm` (or `zypper install`) |
+| Any x86_64 Linux (`bluplay-VER-linux-x86_64.tar.gz`) | `tar xzf bluplay-VER-linux-x86_64.tar.gz && install -m 755 bluplay-VER-linux-x86_64/bluplay ~/.local/bin/` |
+| Source (`bluplay-VER.tar.gz`) | `tar xzf bluplay-VER.tar.gz && cd bluplay-VER && make && sudo make install` |
+
 ## Build and install
 
 ```sh
 make                         # builds ./bluplay
 sudo make install            # installs /usr/local/bin/bluplay
 make install PREFIX=$HOME/.local   # or install for your user only (no root)
+make install DESTDIR=/tmp/pkg PREFIX=/usr   # staged install (bin + README/LICENSE in share/doc/bluplay)
 ```
 
 Packages needed to build, per system:
@@ -228,6 +245,15 @@ expected to work, but have not been tested. Reports are welcome.
   character-width table).
 - Files outside the library share are served over HTTP one at a time and cannot be placed in the player's queue.
 - The bundled tests use a fake player; behaviour with real devices beyond the tested model is unverified.
+
+## Release packaging
+
+`make dist` makes the source tarball `bluplay-VERSION.tar.gz` from `HEAD`. `scripts/release.sh [VERSION]`
+builds every release file into `dist/` from tag `vVERSION`: source tarball, prebuilt tarball, `.deb` and `.rpm`
+(with [nfpm](https://nfpm.goreleaser.com)), the Slackware `.txz` (with the SlackBuild) and `SHA256SUMS`. It also
+updates `slackbuild/bluplay/bluplay.info` (VERSION, DOWNLOAD, MD5SUM); `--upload` attaches the files to the existing
+GitHub release with `gh`. Pushing a `v*` tag runs `.github/workflows/release.yml`, which does the same in a Debian 11
+container and attaches the files to the release.
 
 ## Tests
 

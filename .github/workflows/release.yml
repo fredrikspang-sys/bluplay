@@ -1,0 +1,43 @@
+name: release
+
+# On a pushed tag vX.Y.Z: build the source tarball, prebuilt x86_64 tarball, .deb, .rpm and the Slackware
+# .txz (from slackbuild/bluplay/bluplay.SlackBuild) and attach them plus SHA256SUMS to the GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag: { description: "existing tag to (re)build, e.g. v0.1.1", required: true }
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Debian 11 (glibc 2.31): the binary then runs on Slackware 15, Debian 11+, Ubuntu 22.04+, Fedora, ...
+    # The .txz is built by the real SlackBuild; scripts/makepkg-lite stands in for Slackware's makepkg.
+    container: debian:bullseye
+    env:
+      NFPM_VERSION: 2.43.0
+    steps:
+      - name: tools
+        run: |
+          set -e
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential git xz-utils curl ca-certificates file
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" | tar xz -C /usr/local/bin nfpm
+          curl -fsSL "https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_linux_amd64.tar.gz" | tar xz --strip-components=2 -C /usr/local/bin gh_2.62.0_linux_amd64/bin/gh
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: build artifacts
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          TAG=${{ github.event.inputs.tag || github.ref_name }}
+          sh scripts/release.sh "${TAG#v}" --ref "$TAG"
+      - name: attach to release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          TAG=${{ github.event.inputs.tag || github.ref_name }}
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "bluplay ${TAG#v}" --notes "bluplay ${TAG#v}"
+          gh release upload "$TAG" dist/* -R "$GITHUB_REPOSITORY" --clobber

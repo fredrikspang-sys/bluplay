@@ -1,0 +1,12 @@
+#!/bin/sh
+# Minimal stand-in for Slackware's /sbin/makepkg (used only where pkgtools are missing, e.g. CI).
+# usage: makepkg-lite [-l y|n] [-c y|n] /path/name.txz   (run inside the package root)
+# Packs the current directory as a Slackware package (root ownership, same member layout as makepkg).
+set -e
+while [ $# -gt 1 ]; do shift; done
+OUT=$1
+case "$OUT" in *.txz) C="xz -9e -T0";; *.tgz) C="gzip -9n";; *) echo "unsupported: $OUT" >&2; exit 1;; esac
+[ -f install/slack-desc ] || { echo "no install/slack-desc" >&2; exit 1; }
+LIST=$(mktemp); find . -mindepth 1 | sed 's#^\./##' | LC_ALL=C sort > "$LIST"
+{ echo ./; cat "$LIST"; } | tar --no-recursion --owner=0 --group=0 --numeric-owner -cf - -T - | $C > "$OUT"
+rm -f "$LIST"; echo "Slackware package $OUT created."

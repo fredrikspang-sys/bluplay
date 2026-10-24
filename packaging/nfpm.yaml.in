@@ -1,0 +1,40 @@
+# template, filled in by scripts/release.sh
+name: bluplay
+arch: amd64
+platform: linux
+version: "@VER@"
+release: 1
+section: sound
+priority: optional
+maintainer: "Fredrik Spang <fredrikspang-sys@users.noreply.github.com>"
+description: |
+  Minimalistic terminal music player for BluOS streamers.
+  Keyboard-driven TUI that talks to a BluOS player (Bluesound, NAD, ...)
+  over its HTTP API: browse the local music library and manage the queue.
+vendor: "Fredrik Spang"
+homepage: https://github.com/fredrikspang-sys/bluplay
+license: MIT
+contents:
+  - src: "@BIN@"
+    dst: /usr/bin/bluplay
+    file_info: { mode: 0755 }
+  - src: "@SRC@/README.md"
+    dst: /usr/share/doc/bluplay/README.md
+    file_info: { mode: 0644 }
+  - src: "@SRC@/LICENSE"
+    dst: /usr/share/doc/bluplay/LICENSE
+    file_info: { mode: 0644 }
+overrides:
+  deb:
+    depends:
+      - "libc6 (>= @GLIBC@)"
+    recommends: []
+    suggests:
+      - avahi-utils
+  rpm:
+    depends:
+      - "libc.so.6()(64bit)"
+      - "libc.so.6(GLIBC_@GLIBC@)(64bit)"
+      - "libm.so.6()(64bit)"
+    suggests:
+      - avahi-tools
