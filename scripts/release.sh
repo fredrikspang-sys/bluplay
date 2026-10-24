@@ -69,7 +69,7 @@ if [ $SLACK = 1 ]; then
     sed -i "s#/sbin/makepkg#$WORK/shim/makepkg#" "$SB/bluplay.SlackBuild"
   fi
   [ "$(id -u)" = 0 ] || RUN="unshare -r sh"
-  VERSION=$VER TMP=$WORK/sbtmp OUTPUT=$DIST $RUN "$SB/bluplay.SlackBuild" >"$WORK/sb.log" 2>&1 || { tail -30 "$WORK/sb.log"; exit 1; }
+  PKGTYPE=txz VERSION=$VER TMP=$WORK/sbtmp OUTPUT=$DIST $RUN "$SB/bluplay.SlackBuild" >"$WORK/sb.log" 2>&1 || { tail -30 "$WORK/sb.log"; exit 1; }
 fi
 
 echo "== SHA256SUMS"
