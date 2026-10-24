@@ -139,7 +139,20 @@ Avahi or Bonjour libraries. If nothing answers and `avahi-browse` is installed, 
 - Several found: in the full-screen player you are asked to pick one (Enter = the first). In non-interactive
   modes (`--status`, `--queue`, file playback) the first one is used and named on stderr. `_musc` players
   are listed before `_musp` and `_musz`.
-- None found: bluplay exits with a message explaining how to set the host.
+- None found: the full-screen player starts anyway, shows `Waiting for player… (searching the network every 5 s)`
+  and repeats the search in the background (keys keep working) until a player answers, then connects.
+  Non-interactive modes (`--status`, `--queue`, `--reindex`, file playback) still exit with a message
+  explaining how to set the host.
+
+## Player turned off / unreachable
+
+bluplay does not need the player to be on when it starts. If the configured (or discovered) player does not
+answer, the full-screen player starts anyway and shows `Waiting for player HOST… (retrying every 4 s)`. It
+probes `/Status` at most every 4 seconds (short, non-blocking requests, no busy loop). As soon as the player
+answers it shows `Connected to HOST`, loads the library (and the Albums view) if that had failed, and
+everything works normally. The same applies if the player drops out later (e.g. the amp is switched off):
+bluplay keeps retrying every 4 seconds and picks up again when it is back. Typical use: start bluplay, then
+power on the amp.
 
 `bluplay --discover` lists everything found, as `address:port<TAB>name<TAB>service`. Discovery only works
 when multicast reaches your computer: same LAN/VLAN as the player, UDP 5353 allowed by the firewall, and no

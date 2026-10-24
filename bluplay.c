@@ -35,6 +35,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/wait.h>
 
 /* ---------------------------------------------------------------- utils */
 typedef struct { char *p; size_t n, cap; } Buf;
@@ -1659,19 +1660,28 @@ static void idx_tick(void) {
 #define LP_NOETAG_GAP 5.0
 static struct { int fd, state; double next_at, t0, deadline; Buf raw, body, rq; char etag[80], prev[80]; int errs, lp; } P = { .fd = -1 };
 static int st_changed;
+#define RETRY_SECS 4      /* max gap between /Status probes while the player is unreachable */
+#define DISC_EVERY 3      /* pause between background discovery rounds (each takes discovery_timeout, default 2 s) */
+static int need_host;     /* TUI started without a player: searching the network in the background */
+static int lib_pending;   /* library not loaded yet (player was down): load it once the player answers */
+static int was_down, just_up;
 static void poller_publish(Status *st, const char *err) {
     LASTPOLL = *st; lastpoll_rx = mono();
     if (lastpoll_rx <= st_rx) return;
     Status old = S; S = *st; st_rx = lastpoll_rx;
-    if (err && !st->ok) say("No contact with the player: %s", err);
+    if (err && !st->ok) {
+        if (noui) say("No contact with the player: %s", err);
+        else say("Waiting for player %s\xe2\x80\xa6 (retrying every %d s): %s", HOST, RETRY_SECS, err);
+        was_down = 1;
+    }
     old.secs = S.secs;
     if (memcmp(&old, &S, sizeof old)) st_changed = 1;
 }
 static void poller_fail(const char *m) {
     if (P.fd >= 0) close(P.fd);
     P.fd = -1; P.state = 0; P.errs++; P.etag[0] = 0;
-    if (P.errs >= 2) { Status e; memset(&e, 0, sizeof e); e.song = -1; poller_publish(&e, m); }
-    int sh = P.errs - 1 > 5 ? 5 : P.errs - 1; double g = 1 << sh; if (g > 30) g = 30;
+    if (P.errs >= (noui ? 2 : 1)) { Status e; memset(&e, 0, sizeof e); e.song = -1; poller_publish(&e, m); }
+    int sh = P.errs - 1 > 5 ? 5 : P.errs - 1; double g = 1 << sh; if (g > RETRY_SECS) g = RETRY_SECS;
     P.next_at = mono() + g;
 }
 static void poller_send(void) {
@@ -1701,6 +1711,7 @@ static void poller_done(void) {
     }
     parse_status(P.body.p, &st);
     close(P.fd); P.fd = -1; P.state = 0; P.errs = 0; cpy(P.etag, sizeof P.etag, st.etag);
+    if (was_down) { was_down = 0; just_up = 1; }
     poller_publish(&st, NULL);
     double now = mono(), el = now - P.t0, gap = LP_MIN_GAP - el;
     if (!st.etag[0] || (P.lp && !strcmp(st.etag, P.prev) && el < LP_TIMEOUT / 2)) gap = LP_NOETAG_GAP - el;
@@ -1726,6 +1737,7 @@ static void poller_io(short rev) {
 }
 static void poller_tick(void) {
     double now = mono();
+    if (need_host) return;
     if (P.state == 0 && P.fd < 0 && now >= P.next_at) poller_start();
     else if (P.state && now >= P.deadline) poller_fail("timeout");
 }
@@ -2446,23 +2458,35 @@ static void ui_init_stack(void) {
     nstack = 1; Level *L = &stack[0]; memset(L, 0, sizeof *L);
     strcpy(L->title, "Library"); strcpy(L->key, ROOT); L->items = &L->own;
 }
+static int disc_fd(void); static void disc_event(void); static double disc_tick(void);   /* background discovery, see startup */
+static int lib_init(void) {   /* load the library root and open the Albums view; -1 = player not reachable */
+    if (load(&stack[0]) < 0) return -1;
+    for (int i = 0; i < stack[0].items->n; i++) {
+        Item *it = &stack[0].items->v[i];
+        if (is_albums_root(it)) { if (open_level(it->bkey, it->text ? it->text : "Albums", 1) < 0) say("Error: %s", ERR); break; }
+    }
+    return 0;
+}
+static void lib_retry(void) {   /* the player (re)appeared: load the library if it is still missing */
+    if (just_up && nstack == 1 && stack[0].items->n == 0) lib_pending = 1;
+    if (lib_pending && S.ok && P.errs == 0) { if (lib_init() == 0) lib_pending = 0; else { say("Error: %s", ERR); P.errs = 1; } }
+    if (just_up) { just_up = 0; char m[200]; snprintf(m, sizeof m, "Connected to %s", HOST); if (strcmp(msg, m)) { say("%s", m); } }
+}
 static void run_loop(int ui) {
     noui = !ui;
     if (ui) {
-        if (!have_note) say("Connecting...");
+        if (!have_note) say(need_host ? "Waiting for player\xe2\x80\xa6 (searching the network)" : "Connecting...");
         draw();
-        if (load(&stack[0]) < 0) say("Error: %s", ERR);
+        if (need_host) lib_pending = 1;
+        else if (lib_init() < 0) { lib_pending = 1; say("Waiting for player %s\xe2\x80\xa6 (retrying every %d s): %s", HOST, RETRY_SECS, ERR); was_down = 1; }
         if (!strcmp(msg, "Connecting...")) msgt = 0;
-        if (rnd_mode_env[0]) { safe_refresh(0); rnd_toggle(); }
-        for (int i = 0; i < stack[0].items->n; i++) {
-            Item *it = &stack[0].items->v[i];
-            if (is_albums_root(it)) { if (open_level(it->bkey, it->text ? it->text : "Albums", 1) < 0) say("Error: %s", ERR); break; }
-        }
+        if (rnd_mode_env[0] && !lib_pending) { safe_refresh(0); rnd_toggle(); }
     }
     for (;;) {
         if (got_sig) break;
         got_winch = 0;   /* draw() re-reads the terminal size */
         poller_tick();
+        if (ui) lib_retry();
         if (ui) { aj_tick(); sync_queue(); }
         if (ui && !aj_busy_p() && RND.on && (st_changed || wall() >= rnd_nx)) { rnd_nx = wall() + 5; rnd_fill(0); }
         st_changed = 0;
@@ -2470,7 +2494,8 @@ static void run_loop(int ui) {
         feeder_tick();
         if (ui) draw();
         double tmo = -1; double now = mono();
-        if (P.state == 0) tmo_min(&tmo, (P.next_at - now) * 1000 + 1); else tmo_min(&tmo, (P.deadline - now) * 1000 + 1);
+        if (need_host) { double d = disc_tick(); if (d >= 0) tmo_min(&tmo, d * 1000 + 1); }
+        else if (P.state == 0) tmo_min(&tmo, (P.next_at - now) * 1000 + 1); else tmo_min(&tmo, (P.deadline - now) * 1000 + 1);
         if (ui) {
             if ((!strcmp(S.state, "play") || !strcmp(S.state, "stream")) && st_rx != 0) tmo_min(&tmo, 1000 - ((now - st_rx) - (double)(long long)(now - st_rx)) * 1000 + 5);
             if (wall() - msgt < 5 && msgt > 0) tmo_min(&tmo, (msgt + 5 - wall()) * 1000 + 5);
@@ -2481,7 +2506,8 @@ static void run_loop(int ui) {
         if (FD.on) tmo_min(&tmo, (FD.next - now) * 1000 + 5);
         if (ui) { int at = aj_timeout(); if (at >= 0) tmo_min(&tmo, at); }
         if (ui && key_pending()) tmo = 0;
-        struct pollfd pf[4]; int np = 0, i_in = -1, i_p = -1, i_s = -1, i_a = -1;
+        struct pollfd pf[5]; int np = 0, i_in = -1, i_p = -1, i_s = -1, i_a = -1, i_d = -1;
+        if (need_host && disc_fd() >= 0) { i_d = np; pf[np].fd = disc_fd(); pf[np].events = POLLIN; pf[np++].revents = 0; }
         if (ui) { i_in = np; pf[np].fd = 0; pf[np].events = POLLIN; pf[np++].revents = 0; }
         if (P.fd >= 0) { i_p = np; pf[np].fd = P.fd; pf[np].events = P.state == 1 ? POLLOUT : POLLIN; pf[np++].revents = 0; }
         if (SRV_FD >= 0) { i_s = np; pf[np].fd = SRV_FD; pf[np].events = POLLIN; pf[np++].revents = 0; }
@@ -2493,6 +2519,7 @@ static void run_loop(int ui) {
         if (i_p >= 0 && pf[i_p].revents) poller_io(pf[i_p].revents);
         if (i_s >= 0 && pf[i_s].revents) srv_accept();
         if (i_a >= 0 && pf[i_a].revents) aj_event(pf[i_a].revents);
+        if (i_d >= 0 && pf[i_d].revents) disc_event();
         if (ui && ((i_in >= 0 && pf[i_in].revents) || key_pending())) {
             int k = read_key(0);
             if (k == K_NONE || k == K_IGN) continue;
@@ -2820,7 +2847,7 @@ static void no_player_help(void) {
         CFG.discovery ? " and none was found on the network" : " (discovery is disabled)", path[0] ? path : "~/.config/bluplay/config");
 }
 /* choose the player: configured host, else discovery. -> 0 ok, -1 nothing usable (message printed) */
-static int pick_host(int interactive, int quiet) {
+static int pick_host(int interactive, int quiet, int can_wait) {
     if (CFG.host[0]) {
         if (resolve_host(CFG.host, CFG.port) < 0) { fprintf(stderr, "bluplay: %s\n", ERR); return -1; }
         return 0;
@@ -2828,6 +2855,10 @@ static int pick_host(int interactive, int quiet) {
     if (!CFG.discovery) { no_player_help(); return -1; }
     if (!quiet) { fprintf(stderr, "bluplay: no player configured, searching the network (mDNS)...\n"); fflush(stderr); }
     discover(CFG.disc_tmo);
+    if (!nPLAYERS && can_wait) {   /* TUI: start anyway and keep searching in the background */
+        fprintf(stderr, "bluplay: no player found yet, waiting for one to appear...\n");
+        need_host = 1; return 0;
+    }
     if (!nPLAYERS) { no_player_help(); return -1; }
     int pick = 0;
     if (nPLAYERS > 1 && interactive) {
@@ -2842,6 +2873,44 @@ static int pick_host(int interactive, int quiet) {
     fprintf(stderr, "bluplay: using %s (%s)%s\n", PLAYERS[pick].name, hp, nPLAYERS > 1 && !interactive ? " - first of several found, use --discover to list them" : "");
     snprintf(msg, sizeof msg, "Player: %s (%s), found via mDNS", PLAYERS[pick].name, hp);
     return 0;
+}
+/* ---- background discovery for the TUI when no player was found at startup (forked child -> pipe, never blocks keys) */
+static struct { int fd; pid_t pid; double next; Buf out; } DS = { .fd = -1 };
+static int disc_fd(void) { return DS.fd; }
+static void disc_start(void) {
+    int pp[2]; if (pipe(pp) < 0) { DS.next = mono() + DISC_EVERY; return; }
+    pid_t pid = fork();
+    if (pid < 0) { close(pp[0]); close(pp[1]); DS.next = mono() + DISC_EVERY; return; }
+    if (pid == 0) {
+        server_parent = 0; term_on = 0; close(pp[0]); signal(SIGPIPE, SIG_IGN);
+        int nul = open("/dev/null", O_RDWR); if (nul >= 0) { dup2(nul, 0); dup2(nul, 2); }
+        discover(CFG.disc_tmo);
+        if (nPLAYERS) { char l[512]; int n = snprintf(l, sizeof l, "%s:%d\t%s\n", PLAYERS[0].addr, PLAYERS[0].port, PLAYERS[0].name); if (write(pp[1], l, (size_t)n)) {} }
+        _exit(0);
+    }
+    close(pp[1]); set_nb(pp[0]); DS.fd = pp[0]; DS.pid = pid; breset(&DS.out);
+}
+static void disc_event(void) {
+    char tmp[512]; ssize_t k = read(DS.fd, tmp, sizeof tmp);
+    if (k > 0) { bcat(&DS.out, tmp, (size_t)k); return; }
+    if (k < 0 && (errno == EAGAIN || errno == EINTR)) return;
+    close(DS.fd); DS.fd = -1; waitpid(DS.pid, NULL, 0);
+    char *line = DS.out.p, *tab = line ? strchr(line, '\t') : NULL;
+    if (tab) {
+        *tab = 0; char *name = tab + 1; char *nl = strchr(name, '\n'); if (nl) *nl = 0;
+        if (resolve_host(line, 0) == 0) {
+            need_host = 0; was_down = 1; P.errs = 0; P.next_at = 0;
+            say("Found %s (%s), connecting\xe2\x80\xa6", name, HOST); return;
+        }
+    }
+    say("Waiting for player\xe2\x80\xa6 (searching the network every %d s)", (int)(CFG.disc_tmo + DISC_EVERY + 0.5));
+    DS.next = mono() + DISC_EVERY;
+}
+static double disc_tick(void) {   /* -> seconds until the next round, -1 while one runs */
+    if (DS.fd >= 0) return -1;
+    double now = mono();
+    if (now >= DS.next) { disc_start(); return DS.fd >= 0 ? -1 : DISC_EVERY; }
+    return DS.next - now;
 }
 static void reindex_cli(void) {
     int n = indexing_count(); double t0 = wall(), grace = 0;
@@ -3030,7 +3099,7 @@ int main(int argc, char **argv) {
     cfg_apply_shares();
     if (mode == M_DISCOVER) { free(files); return discover_cli(); }
     int interactive = mode == M_TUI && !no_ui && isatty(0) && isatty(1);
-    if (pick_host(interactive, mode != M_TUI && mode != M_REINDEX && !nfiles) < 0) { free(files); return 1; }
+    if (pick_host(interactive, mode != M_TUI && mode != M_REINDEX && !nfiles, interactive && !nfiles) < 0) { free(files); return 1; }
     if (msg[0]) { msgt = wall(); have_note = 1; }
     if (mode == M_REINDEX) { reindex_cli(); free(files); return 0; }
     if (mode == M_SEEK) {
