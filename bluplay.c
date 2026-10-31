@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: MIT
  */
 #define _GNU_SOURCE
-#define BLUPLAY_VERSION "0.2.0"
+#define BLUPLAY_VERSION "0.3.0"
 #include <stdio.h>
 #include <ctype.h>
 #include <limits.h>

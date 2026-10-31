@@ -44,7 +44,7 @@ ncurses or any other library.
 
 Every [GitHub release](https://github.com/fredrikspang-sys/bluplay/releases) has ready-made x86_64 packages
 and a `SHA256SUMS` file (check with `sha256sum -c --ignore-missing SHA256SUMS`). Replace `VER` with the
-version, e.g. `0.2.0`. The prebuilt binaries only need glibc; release 0.1.1 needs glibc 2.33 or newer (Slackware 15,
+version, e.g. `0.3.0`. The prebuilt binaries only need glibc; release 0.1.1 needs glibc 2.33 or newer (Slackware 15,
 Debian 12, Ubuntu 22.04, Fedora 34 or later); otherwise build from source (below).
 
 | Format | Install |
