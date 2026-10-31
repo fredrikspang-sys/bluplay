@@ -266,14 +266,6 @@ updates `slackbuild/bluplay/bluplay.info` (VERSION, DOWNLOAD, MD5SUM); `--upload
 GitHub release with `gh`. Pushing a `v*` tag runs `.github/workflows/release.yml`, which does the same in a Debian 11
 container and attaches the files to the release.
 
-## Tests
-
-`make test` builds bluplay and runs `tests/smoke.py`, which starts `tests/fake_player.py` (a small fake
-BluOS HTTP API on 127.0.0.1) and `tests/fake_mdns.py`, then checks the command-line modes, configuration
-precedence, discovery and the full-screen UI (driven through a pseudo-terminal with `pyte`). The tests never
-contact a real player. `make test-san` runs the same tests against the sanitizer build.
-`BLUPLAY_MDNS_ADDR=ip:port` (test hook) sends the discovery query to that address instead of the multicast group.
-
 ## Disclaimer
 
 bluplay is an independent project. It is not affiliated with, endorsed by or supported by Bluesound, NAD
