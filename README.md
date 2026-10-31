@@ -44,7 +44,7 @@ ncurses or any other library.
 
 Every [GitHub release](https://github.com/fredrikspang-sys/bluplay/releases) has ready-made x86_64 packages
 and a `SHA256SUMS` file (check with `sha256sum -c --ignore-missing SHA256SUMS`). Replace `VER` with the
-version, e.g. `0.1.1`. The prebuilt binaries only need glibc; release 0.1.1 needs glibc 2.33 or newer (Slackware 15,
+version, e.g. `0.2.0`. The prebuilt binaries only need glibc; release 0.1.1 needs glibc 2.33 or newer (Slackware 15,
 Debian 12, Ubuntu 22.04, Fedora 34 or later); otherwise build from source (below).
 
 | Format | Install |
@@ -249,7 +249,7 @@ expected to work, but have not been tested. Reports are welcome.
 
 ## Limitations
 
-- Local library only: no streaming services, internet radio, presets or player settings.
+- Local library only: no streaming services, internet radio or player settings (presets can only be played, with `P`).
 - IPv4 only.
 - Grouping is basic: the player bluplay controls is always the group master, and at most 9 other players are listed.
 - Some modern terminal emoji/wide characters may be measured incorrectly (bluplay has its own small

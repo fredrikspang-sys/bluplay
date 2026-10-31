@@ -117,7 +117,7 @@ try:
             with open(os.environ["SMOKE_SCREEN"], "w") as f: f.write("\n".join(l.rstrip() for l in scr.display) + "\n")
         ok("UI: title line shows playing track", "Track 1" in scr.display[0], scr.display[0])
         ok("UI: progress bar on status line", re.search(r" \[ {5,}\] +\d+:\d\d/3:20 ", scr.display[1]) and (lambda r, e: r[e - 1].bg == "bcbcbc" and r[e - 1].underscore and r[e].bg == "bcbcbc")(scr.buffer[1], scr.display[1].index("] ")) and all(scr.buffer[y][x].bg == "bcbcbc" and scr.buffer[y][x].fg == "000000" for y in (0, 1) for x in (0, cols - 2)) and scr.buffer[3][0].bg == "default", scr.display[1])
-        key(b"?"); ok("UI: ? shows help", "bluplay 0.1.0 - help" in text() and "multi-select" in text().lower(), text())
+        key(b"?"); ok("UI: ? shows help", "bluplay 0.2.0 - help" in text() and "multi-select" in text().lower(), text())
         key(b"x"); ok("UI: any key closes help", "Queue (20)" in text(), text())
         key(b"G"); ok("UI: G lists other players", wait(lambda: "1 [ ] Kitchen" in scr.display[-1] and "Living Room" not in scr.display[-1], 6), scr.display[-1])
         key(b"1"); ok("UI: 1 groups Kitchen", wait(lambda: "1 [x] Kitchen" in scr.display[-1]) and 'slave id="127.0.0.2"' in srv("/SyncStatus"), scr.display[-1])
