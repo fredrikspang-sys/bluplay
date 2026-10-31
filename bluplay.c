@@ -773,14 +773,14 @@ have:;
 typedef struct {
     int ok;
     char state[32], title[400], artist[400], album[400], db[32], pid[32], fmt[96], fn[1100], url[1100], service[48], format[128], etag[80];
-    int vol, secs, tot, song, indexing;
+    int vol, secs, tot, song, indexing, shuffle, repeat;   /* repeat: BluOS 0 = queue, 1 = track, 2 = off; -1 unknown */
 } Status;
 static Status S, LASTPOLL; static double st_rx, lastpoll_rx;
 
 static void parse_status(const char *xml, Status *st) {
     memset(st, 0, sizeof *st); st->ok = 1; st->song = -1;
     char title1[400] = "", name[400] = "", t2[400] = "", artist[400] = "", t3[400] = "", album[400] = "", vol[32] = "", secs[32] = "", tot[32] = "", song[32] = "", ind[32] = "";
-    char sf[96] = "", quality[96] = "";
+    char sf[96] = "", quality[96] = "", shf[16] = "", rep[16] = "";
     Tag t; const char *p = xml; int depth = 0;
     while ((p = xml_next(p, &t))) {
         if (t.kind == 2) { depth--; continue; }
@@ -789,7 +789,7 @@ static void parse_status(const char *xml, Status *st) {
 #define F(nm, dst) if (tag_is(&t, nm)) sets(dst, sizeof dst, xml_text(p)); else
             F("state", st->state) F("title1", title1) F("name", name) F("title2", t2) F("artist", artist) F("title3", t3) F("album", album)
             F("volume", vol) F("db", st->db) F("secs", secs) F("totlen", tot) F("song", song) F("pid", st->pid) F("streamFormat", sf) F("quality", quality)
-            F("indexing", ind) F("fn", st->fn) F("streamUrl", st->url) F("service", st->service) {}
+            F("indexing", ind) F("fn", st->fn) F("streamUrl", st->url) F("service", st->service) F("shuffle", shf) F("repeat", rep) {}
 #undef F
         }
         if (t.kind == 1) depth++;
@@ -798,6 +798,7 @@ static void parse_status(const char *xml, Status *st) {
     cpy(st->artist, sizeof st->artist, t2[0] ? t2 : artist);
     cpy(st->album, sizeof st->album, t3[0] ? t3 : album);
     st->vol = toi(vol, 0); st->secs = toi(secs, 0); st->tot = toi(tot, 0); st->song = toi(song, -1); st->indexing = toi(ind, 0); if (st->indexing < 0) st->indexing = 0;
+    st->shuffle = toi(shf, 0) == 1; st->repeat = rep[0] ? toi(rep, -1) : -1; if (st->repeat > 2) st->repeat = -1;
     cpy(st->fmt, sizeof st->fmt, sf[0] ? sf : quality);
     fmt_text(st->format, sizeof st->format, st->fn, sf, quality);
     Meta m;
@@ -1253,6 +1254,8 @@ static const char *HELP_LINES[] = {
     "I             reindex the player's library (y/n); progress 'Indexing: N' at the bottom;",
     "              when done the album list is reloaded. From a shell: bluplay --reindex",
     "Format        the playing track shows its format (e.g. FLAC 24 bit 192 kHz); in the queue the selected track's is shown.",
+    "s             shuffle ON/OFF (the player shuffles the play order of the current queue)",
+    "t             repeat: off -> queue -> track -> off (off = play the queue only once)",
     "R             random play ON/OFF: keeps the queue topped up with random tracks from the whole library",
     "              (<3 left after the current one => fill up to 5; played tracks it added are removed; OFF leaves the queue).",
     "              Start with: bluplay --random [album]   (album = add whole albums).",
@@ -1266,6 +1269,8 @@ static const char *HELP_LINES[] = {
     NULL };
 
 static int rnd_on;
+static const char *REPEAT_NAME[] = { "queue", "track", "off" };   /* index = BluOS /Repeat?state= value */
+static int cfg_shuffle = -1, cfg_repeat = -1, modes_pending;       /* shuffle/repeat from config/env/flags, set once connected */
 static int idx_active; static struct { double t0, grace, next; int n, cur, done, errs; char err[200]; } IDX;
 
 static const char *foot_sel(void) {
@@ -1334,6 +1339,7 @@ static void draw(void) {
     int slo = 0, shi = 0, hs = focus == 1 ? sel_range(&slo, &shi) : 0;
     if (hs) snprintf(line, sizeof line, "Queue (%d, %d selected)%s", Q.n, shi - slo + 1, rnd_on ? "  Random: ON" : "");
     else snprintf(line, sizeof line, "Queue (%d)%s", Q.n, rnd_on ? "  Random: ON" : "");
+    if (st->ok && st->repeat >= 0) { size_t ln = strlen(line); snprintf(line + ln, sizeof line - ln, "  Shuffle: %s  Repeat: %s", st->shuffle ? "ON" : "OFF", REPEAT_NAME[st->repeat]); }
     rput(2, line, rw, A_UL | (focus == 1 ? A_REV : 0), 0);
     if (L->sel > nview - 1) { L->sel = nview - 1; } if (L->sel < 0) L->sel = 0;
     int cs = st->song;
@@ -1927,6 +1933,11 @@ static int do_key(int k) {
     else if (k == 'p') { Buf b = {0}; if (call(&b, "/Back", NULL) < 0) say("Error: %s", ERR); bfree(&b); }
     else if (k == '+' || k == '-' || k == '=') c_call("/Volume", "db", k == '-' ? "-2" : "2");
     else if (k == 'R') rnd_toggle();
+    else if (k == 's') { c_call("/Shuffle", "state", S.shuffle ? "0" : "1"); say("Shuffle: %s", S.shuffle ? "OFF" : "ON"); }
+    else if (k == 't') {   /* off(2) -> queue(0) -> track(1) -> off(2) */
+        int r = S.repeat == 2 || S.repeat < 0 ? 0 : S.repeat == 0 ? 1 : 2; char v[16]; snprintf(v, sizeof v, "%d", r);
+        c_call("/Repeat", "state", v); say("Repeat: %s", REPEAT_NAME[r]);
+    }
     else if ((k == ',' || k == '.') && seek_to(pos_now() + (k == '.' ? 10 : -10), &S) < 0) say("Error: %s", ERR);
     else if (k == '?') help_screen();
     else if (k == 'G') group_ui();
@@ -2470,6 +2481,11 @@ static int lib_init(void) {   /* load the library root and open the Albums view;
 static void lib_retry(void) {   /* the player (re)appeared: load the library if it is still missing */
     if (just_up && nstack == 1 && stack[0].items->n == 0) lib_pending = 1;
     if (lib_pending && S.ok && P.errs == 0) { if (lib_init() == 0) lib_pending = 0; else { say("Error: %s", ERR); P.errs = 1; } }
+    if (modes_pending && S.ok && P.errs == 0) {   /* shuffle/repeat from config: applied once the player answers */
+        char v[16]; modes_pending = 0;
+        if (cfg_shuffle >= 0 && cfg_shuffle != S.shuffle) c_call("/Shuffle", "state", cfg_shuffle ? "1" : "0");
+        if (cfg_repeat >= 0 && cfg_repeat != S.repeat) { snprintf(v, sizeof v, "%d", cfg_repeat); c_call("/Repeat", "state", v); }
+    }
     if (just_up) { just_up = 0; char m[200]; snprintf(m, sizeof m, "Connected to %s", HOST); if (strcmp(msg, m)) { say("%s", m); } }
 }
 static void run_loop(int ui) {
@@ -2554,7 +2570,7 @@ static int resolve_host(const char *hp, int defport) {   /* "host", "host:port" 
 /* ---------------------------------------------------------------- configuration
  * Precedence (highest first): command-line flags > BLUPLAY_* environment > config file > discovery.
  * Config file: key = value lines, '#' comments. Keys: host, port, library_root, player_root, shares,
- * db_offset, random, discovery, discovery_timeout. */
+ * db_offset, random, shuffle, repeat, discovery, discovery_timeout. */
 static struct {
     char host[256], lib[512], prem[512], shares[2048], cfgpath[1024];
     int port, discovery; double disc_tmo;
@@ -2584,6 +2600,12 @@ static int cfg_set(const char *k, const char *v, const char *src) {   /* 0 ok, -
     else if (!strcmp(k, "random")) {
         if (!*v || !strcmp(v, "off") || !strcmp(v, "0")) rnd_mode_env[0] = 0;
         else cpy(rnd_mode_env, sizeof rnd_mode_env, !strcmp(v, "album") ? "album" : "track");
+    }
+    else if (!strcmp(k, "shuffle")) { cfg_shuffle = parse_bool(v); modes_pending = 1; }
+    else if (!strcmp(k, "repeat")) {
+        int r = !strcmp(v, "queue") ? 0 : !strcmp(v, "track") ? 1 : !strcmp(v, "off") ? 2 : -1;
+        if (r < 0) { fprintf(stderr, "bluplay: %s: invalid repeat '%s' (off, queue or track)\n", src, v); return -1; }
+        cfg_repeat = r; modes_pending = 1;
     }
     else if (!strcmp(k, "discovery")) CFG.discovery = parse_bool(v);
     else if (!strcmp(k, "discovery_timeout")) {
@@ -2626,7 +2648,8 @@ static int cfg_load(const char *path, int must_exist) {
 static void cfg_env(void) {
     static const struct { const char *env, *key; } E[] = {
         { "BLUPLAY_HOST", "host" }, { "BLUPLAY_PORT", "port" }, { "BLUPLAY_LIBRARY_ROOT", "library_root" }, { "BLUPLAY_PLAYER_ROOT", "player_root" },
-        { "BLUPLAY_SHARES", "shares" }, { "BLUPLAY_DB_OFFSET", "db_offset" }, { "BLUPLAY_RANDOM", "random" }, { "BLUPLAY_DISCOVERY", "discovery" } };
+        { "BLUPLAY_SHARES", "shares" }, { "BLUPLAY_DB_OFFSET", "db_offset" }, { "BLUPLAY_RANDOM", "random" },
+        { "BLUPLAY_SHUFFLE", "shuffle" }, { "BLUPLAY_REPEAT", "repeat" }, { "BLUPLAY_DISCOVERY", "discovery" } };
     for (size_t i = 0; i < sizeof E / sizeof *E; i++) { const char *v = getenv(E[i].env); if (v && *v) cfg_set(E[i].key, v, E[i].env); }
 }
 static void cfg_apply_shares(void) {
@@ -2948,6 +2971,8 @@ static void usage(FILE *o) {
           "  -c, --config FILE          config file (default ~/.config/bluplay/config)\n"
           "      --db-offset DB         add DB to the displayed volume in dB (default 0)\n"
           "      --random [album]       start with random play on (whole albums with 'album')\n"
+          "      --shuffle [on|off]     set the player's shuffle when the player starts (default on)\n"
+          "      --repeat off|queue|track  set the player's repeat mode when the player starts\n"
           "      --no-discover          never search the network for players\n"
           "      --discover             list players found on the network and exit\n"
           "      --status               print the player status and exit\n"
@@ -2960,7 +2985,8 @@ static void usage(FILE *o) {
           "  -V, --version              print the version\n"
           "  -h, --help                 this help\n\n"
           "environment: BLUPLAY_HOST, BLUPLAY_PORT, BLUPLAY_LIBRARY_ROOT, BLUPLAY_PLAYER_ROOT, BLUPLAY_SHARES,\n"
-          "             BLUPLAY_DB_OFFSET, BLUPLAY_RANDOM, BLUPLAY_DISCOVERY, BLUPLAY_CONFIG\n"
+          "             BLUPLAY_DB_OFFSET, BLUPLAY_RANDOM, BLUPLAY_SHUFFLE, BLUPLAY_REPEAT,\n"
+          "             BLUPLAY_DISCOVERY, BLUPLAY_CONFIG\n"
           "Command-line flags override the environment, which overrides the config file.\n"
           "Press ? inside the player for key bindings.\n", o);
 }
@@ -3085,6 +3111,12 @@ int main(int argc, char **argv) {
             else if (i + 1 < argc && !strcmp(argv[i + 1], "album")) { cfg_set("random", "album", opt); i++; }
             else cfg_set("random", "track", opt);
         }
+        else if (!strcmp(opt, "--shuffle")) {
+            if (val) { if (cfg_set("shuffle", val, opt) < 0) return 2; }
+            else if (i + 1 < argc && (!strcmp(argv[i + 1], "on") || !strcmp(argv[i + 1], "off"))) cfg_set("shuffle", argv[++i], opt);
+            else cfg_set("shuffle", "on", opt);
+        }
+        else if (!strcmp(opt, "--repeat")) { NEEDVAL(); if (cfg_set("repeat", val, opt) < 0) return 2; }
         else if (!strcmp(opt, "--no-discover")) CFG.discovery = 0;
         else if (!strcmp(opt, "--discover")) mode = M_DISCOVER;
         else if (!strcmp(opt, "--status")) mode = M_STATUS;

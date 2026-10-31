@@ -123,6 +123,11 @@ try:
         key(b"1"); ok("UI: 1 groups Kitchen", wait(lambda: "1 [x] Kitchen" in scr.display[-1]) and 'slave id="127.0.0.2"' in srv("/SyncStatus"), scr.display[-1])
         key(b"1"); ok("UI: 1 again ungroups", wait(lambda: "1 [ ] Kitchen" in scr.display[-1]) and "slave" not in srv("/SyncStatus"), scr.display[-1])
         key(b"\x1b", 0.6); ok("UI: Esc closes group list", "Ungrouped: Kitchen" in scr.display[-1], scr.display[-1])
+        ok("UI: queue header shows shuffle/repeat", wait(lambda: "Shuffle: OFF  Repeat: off" in scr.display[2]), scr.display[2])
+        key(b"s"); ok("UI: s turns shuffle on", wait(lambda: "<shuffle>1</shuffle>" in srv("/Status") and "Shuffle: ON" in scr.display[2]), scr.display[2])
+        key(b"s"); ok("UI: s again turns it off", wait(lambda: "<shuffle>0</shuffle>" in srv("/Status") and "Shuffle: OFF" in scr.display[2]), scr.display[2])
+        for v, nm in ((0, "queue"), (1, "track"), (2, "off")):
+            key(b"t"); ok("UI: t cycles repeat to %s" % nm, wait(lambda: "<repeat>%d</repeat>" % v in srv("/Status") and ("Repeat: " + nm) in scr.display[2]), scr.display[2])
         key(b" "); ok("UI: space pauses", wait(lambda: status()["state"] == "pause"), status())
         key(b" "); ok("UI: space resumes", wait(lambda: status()["state"] == "play"), status())
         db0 = status()["db"]; key(b"+"); ok("UI: + raises volume 2 dB", wait(lambda: status()["db"] == db0 + 2), (db0, status()))

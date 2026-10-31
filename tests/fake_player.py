@@ -32,7 +32,7 @@ def tfile(i, k): return "%s/%s/%s.flac" % (MUSIC_ROOT, ALBUMS[i]["n"], ALBUMS[i]
 def make_queue(n): return [dict(t="Track %d" % (i + 1), a="Queue Artist", b="Queue Album", f="%s/queue/%02d.flac" % (MUSIC_ROOT, i + 1)) for i in range(n)]
 
 Q = make_queue(int(os.environ.get("FAKE_QN", "4")))
-S = {"state": "play", "vol": 40, "db": -40, "pid": 1, "song": 0, "base": 0.0, "t0": time.time(), "idx_t0": 0, "idx_dur": 0}
+S = {"state": "play", "vol": 40, "db": -40, "pid": 1, "song": 0, "base": 0.0, "t0": time.time(), "idx_t0": 0, "idx_dur": 0, "shuffle": 0, "repeat": 2}
 DELLOG = []
 
 def secs(): return int(S["base"] + (time.time() - S["t0"] if S["state"] == "play" else 0))
@@ -46,9 +46,9 @@ def idxn():
 def core():
     s = Q[S["song"]] if 0 <= S["song"] < len(Q) else None
     return ("<state>%s</state><pid>%d</pid><song>%d</song><title1>%s</title1><title2>%s</title2><title3>%s</title3>"
-            "<volume>%d</volume><db>%d</db><totlen>200</totlen><indexing>%d</indexing><streamFormat>FLAC 16/44.1</streamFormat>%s") % (
+            "<volume>%d</volume><db>%d</db><totlen>200</totlen><indexing>%d</indexing><streamFormat>FLAC 16/44.1</streamFormat><shuffle>%d</shuffle><repeat>%d</repeat>%s") % (
         S["state"], S["pid"], S["song"], escape(s["t"]) if s else "", escape(s["a"]) if s else "", escape(s["b"]) if s else "",
-        S["vol"], S["db"], idxn(), ("<fn>%s</fn>" % escape(s["f"])) if s else "")
+        S["vol"], S["db"], idxn(), S["shuffle"], S["repeat"], ("<fn>%s</fn>" % escape(s["f"])) if s else "")
 def etag(c): return hashlib.md5(c.encode()).hexdigest()
 def sect(n): return n[:1].upper() if n[:1].isalpha() and n[:1].isascii() else "#"
 def aitem(i):
@@ -143,6 +143,8 @@ class H(http.server.BaseHTTPRequestHandler):
         elif p == "/Volume":
             if "db" in qs: S["db"] = max(-80, min(0, S["db"] + int(g("db")))); S["vol"] = S["db"] + 80
             bump(); x = '<volume db="%d">%d</volume>' % (S["db"], S["vol"])
+        elif p in ("/Shuffle", "/Repeat"):
+            k = p[1:].lower(); S[k] = int(g("state", "0")); bump(); x = '<playlist shuffle="%d" repeat="%d"/>' % (S["shuffle"], S["repeat"])
         elif p == "/Pause":
             setpos(secs()); S["state"] = "pause" if S["state"] == "play" else "play"; bump(); x = "<state>%s</state>" % S["state"]
         elif p == "/Skip":

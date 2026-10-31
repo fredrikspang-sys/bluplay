@@ -119,6 +119,8 @@ player_root  = /var/mnt/NAS-Music   # the same folder as the player names it (se
 
 db_offset = 0                # added to the volume shown in dB (e.g. to match an amplifier's display)
 random = off                 # track | album | off: start with random mode on
+shuffle = off                # on | off: set the player's shuffle at start (leave out = unchanged)
+repeat = off                 # off | queue | track: set the player's repeat at start (leave out = unchanged)
 discovery = on               # set to off to never search the network
 discovery_timeout = 2        # seconds to wait for mDNS answers
 ```
@@ -132,6 +134,8 @@ discovery_timeout = 2        # seconds to wait for mDNS answers
 | `shares` | | `BLUPLAY_SHARES` | none |
 | `db_offset` | `--db-offset DB` | `BLUPLAY_DB_OFFSET` | `0` |
 | `random` | `--random [album]` | `BLUPLAY_RANDOM` | off |
+| `shuffle` | `--shuffle [on\|off]` | `BLUPLAY_SHUFFLE` | unchanged |
+| `repeat` | `--repeat off\|queue\|track` | `BLUPLAY_REPEAT` | unchanged |
 | `discovery` | `--no-discover` | `BLUPLAY_DISCOVERY` | on |
 | `discovery_timeout` | | | `2` |
 | config file | `-c`, `--config FILE` | `BLUPLAY_CONFIG` | `~/.config/bluplay/config` |
@@ -198,6 +202,8 @@ Global (both panes):
 | `p` | restart the track; press twice for the previous track (BluOS `/Back`) |
 | `+` or `=` / `-` | volume up / down 2 dB |
 | `,` / `.` | seek back / forward 10 s (tracks with a known length; not radio/streams) |
+| `s` | shuffle on/off (player shuffles the current queue's play order) |
+| `t` | repeat: off -> queue -> track -> off (`r` was taken: reload folder) |
 | `R` | random mode on/off |
 | `I` | reindex the player's library (asks y/n) |
 | `G` | group players: list others on the network, `1`-`9` adds/removes one (see [Multi-room grouping](#multi-room-grouping)) |
