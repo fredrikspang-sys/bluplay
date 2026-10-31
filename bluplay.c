@@ -774,13 +774,15 @@ typedef struct {
     int ok;
     char state[32], title[400], artist[400], album[400], db[32], pid[32], fmt[96], fn[1100], url[1100], service[48], format[128], etag[80];
     int vol, secs, tot, song, indexing, shuffle, repeat;   /* repeat: BluOS 0 = queue, 1 = track, 2 = off; -1 unknown */
+    int mute, sleep;   /* mute: <mute>1</mute>; sleep: minutes left on the sleep timer, 0 = off (<sleep></sleep>) */
+    char mutedb[32];
 } Status;
 static Status S, LASTPOLL; static double st_rx, lastpoll_rx;
 
 static void parse_status(const char *xml, Status *st) {
     memset(st, 0, sizeof *st); st->ok = 1; st->song = -1;
     char title1[400] = "", name[400] = "", t2[400] = "", artist[400] = "", t3[400] = "", album[400] = "", vol[32] = "", secs[32] = "", tot[32] = "", song[32] = "", ind[32] = "";
-    char sf[96] = "", quality[96] = "", shf[16] = "", rep[16] = "";
+    char sf[96] = "", quality[96] = "", shf[16] = "", rep[16] = "", mut[16] = "", slp[16] = "";
     Tag t; const char *p = xml; int depth = 0;
     while ((p = xml_next(p, &t))) {
         if (t.kind == 2) { depth--; continue; }
@@ -789,7 +791,8 @@ static void parse_status(const char *xml, Status *st) {
 #define F(nm, dst) if (tag_is(&t, nm)) sets(dst, sizeof dst, xml_text(p)); else
             F("state", st->state) F("title1", title1) F("name", name) F("title2", t2) F("artist", artist) F("title3", t3) F("album", album)
             F("volume", vol) F("db", st->db) F("secs", secs) F("totlen", tot) F("song", song) F("pid", st->pid) F("streamFormat", sf) F("quality", quality)
-            F("indexing", ind) F("fn", st->fn) F("streamUrl", st->url) F("service", st->service) F("shuffle", shf) F("repeat", rep) {}
+            F("indexing", ind) F("fn", st->fn) F("streamUrl", st->url) F("service", st->service) F("shuffle", shf) F("repeat", rep)
+            F("mute", mut) F("muteDb", st->mutedb) F("sleep", slp) {}
 #undef F
         }
         if (t.kind == 1) depth++;
@@ -799,6 +802,7 @@ static void parse_status(const char *xml, Status *st) {
     cpy(st->album, sizeof st->album, t3[0] ? t3 : album);
     st->vol = toi(vol, 0); st->secs = toi(secs, 0); st->tot = toi(tot, 0); st->song = toi(song, -1); st->indexing = toi(ind, 0); if (st->indexing < 0) st->indexing = 0;
     st->shuffle = toi(shf, 0) == 1; st->repeat = rep[0] ? toi(rep, -1) : -1; if (st->repeat > 2) st->repeat = -1;
+    st->mute = toi(mut, 0) == 1; st->sleep = toi(slp, 0); if (st->sleep < 0) st->sleep = 0;
     cpy(st->fmt, sizeof st->fmt, sf[0] ? sf : quality);
     fmt_text(st->format, sizeof st->format, st->fn, sf, quality);
     Meta m;
@@ -1256,6 +1260,11 @@ static const char *HELP_LINES[] = {
     "Format        the playing track shows its format (e.g. FLAC 24 bit 192 kHz); in the queue the selected track's is shown.",
     "s             shuffle ON/OFF (the player shuffles the play order of the current queue)",
     "t             repeat: off -> queue -> track -> off (off = play the queue only once)",
+    "m             mute ON/OFF (the volume level is kept; MUTED in the top line)",
+    "S             stop (space resumes from the start of the track)",
+    "z             sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off ('sleep Nm' in the top line)",
+    "P             presets: lists the player's presets, 1-9 plays one",
+    "J / K         in the queue: move the selected track down / up one place",
     "R             random play ON/OFF: keeps the queue topped up with random tracks from the whole library",
     "              (<3 left after the current one => fill up to 5; played tracks it added are removed; OFF leaves the queue).",
     "              Start with: bluplay --random [album]   (album = add whole albums).",
@@ -1317,8 +1326,9 @@ static void draw(void) {
     rput(0, line, W, A_BOLD | A_NP, 0);   /* now-playing lines: black on light grey */
     char tp[16], tt[16], dbs[48], right[400];
     int p = pos_now(); snprintf(tp, sizeof tp, "%d:%02d", p / 60, p % 60); snprintf(tt, sizeof tt, "%d:%02d", st->tot / 60, st->tot % 60);
-    if (st->ok && st->db[0]) dbtxt(st, dbs, sizeof dbs); else if (st->ok) snprintf(dbs, sizeof dbs, "%d", st->vol); else strcpy(dbs, "?");
-    xsnprintf(right, sizeof right, "%s/%s  vol %s  %s", tp, tt, dbs, st->format[0] ? st->format : st->fmt);
+    if (st->ok && st->mute && st->mutedb[0]) { Status m = *st; cpy(m.db, sizeof m.db, st->mutedb); dbtxt(&m, dbs, sizeof dbs); } else if (st->ok && st->db[0]) dbtxt(st, dbs, sizeof dbs); else if (st->ok) snprintf(dbs, sizeof dbs, "%d", st->vol); else strcpy(dbs, "?");
+    char slp[24] = ""; if (st->ok && st->sleep > 0) snprintf(slp, sizeof slp, "  sleep %dm", st->sleep);
+    xsnprintf(right, sizeof right, "%s/%s  vol %s%s%s  %s", tp, tt, dbs, st->ok && st->mute ? " MUTED" : "", slp, st->format[0] ? st->format : st->fmt);
     int rw_ = strwidth(right);
     if (rw_ + 10 < W) {
         xsnprintf(line, sizeof line, "%s - %s", st->artist, st->album);
@@ -1912,6 +1922,7 @@ static int seek_to(int s, const Status *st) {   /* /Play?seek=N (absolute), clam
 }
 static void safe_refresh(int force) { if (refresh(force) < 0) say("Error: %s", ERR); }
 static void group_ui(void);
+static void preset_ui(void);
 static int do_key(int k) {
     int sh = k == K_SUP || k == K_SDOWN || k == K_SPGUP || k == K_SPGDN || k == K_SHOME || k == K_SEND;   /* Shift+movement = extend selection */
     if (sh) k = k == K_SUP ? K_UP : k == K_SDOWN ? K_DOWN : k == K_SPGUP ? K_PGUP : k == K_SPGDN ? K_PGDN : k == K_SHOME ? K_HOME : K_END;
@@ -1938,6 +1949,15 @@ static int do_key(int k) {
         int r = S.repeat == 2 || S.repeat < 0 ? 0 : S.repeat == 0 ? 1 : 2; char v[16]; snprintf(v, sizeof v, "%d", r);
         c_call("/Repeat", "state", v); say("Repeat: %s", REPEAT_NAME[r]);
     }
+    else if (k == 'm') { c_call("/Volume", "mute", S.mute ? "0" : "1"); say("Mute: %s", S.mute ? "OFF" : "ON"); }
+    else if (k == 'S') { Buf b = {0}; if (call(&b, "/Stop", NULL) < 0) say("Error: %s", ERR); bfree(&b); }
+    else if (k == 'z') {   /* each /Sleep steps the timer: 15, 30, 45, 60, 90 min, off */
+        Buf b = {0};
+        if (call(&b, "/Sleep", NULL) < 0) say("Error: %s", ERR);
+        else { char *v = xml_any_text(b.p, "sleep"); int m = v ? toi(v, 0) : 0; if (m > 0) say("Sleep timer: %d min", m); else say("Sleep timer: off"); free(v); }
+        bfree(&b);
+    }
+    else if (k == 'P') preset_ui();
     else if ((k == ',' || k == '.') && seek_to(pos_now() + (k == '.' ? 10 : -10), &S) < 0) say("Error: %s", ERR);
     else if (k == '?') help_screen();
     else if (k == 'G') group_ui();
@@ -1999,6 +2019,16 @@ static int do_key(int k) {
             snprintf(c, sizeof c, n == Q.n ? "Remove all %d tracks (clear queue)%s? y/n" : "Remove %d selected tracks%s? y/n", n, pl ? " - incl. the playing one" : "");
             int g = qgen;
             if (confirm(c)) { if (g == qgen) q_delete(lo, hi); else say("Queue changed - try again"); }
+        } else if (k == 'J' || k == 'K') {   /* /Move?old=&new= : 0-based playlist song ids (= queue rows) */
+            int to = qsel + (k == 'J' ? 1 : -1);
+            if (!qpid_valid) say("Queue not synchronised yet - try again");
+            else if (to >= 0 && to < Q.n) {
+                char o[16], n[16]; snprintf(o, sizeof o, "%d", Q.v[qsel].id); snprintf(n, sizeof n, "%d", Q.v[to].id);
+                Buf b = {0};
+                if (call(&b, "/Move", "old", o, "new", n, NULL) < 0) say("Error: %s", ERR);
+                else { qsel = to; safe_refresh(1); }
+                bfree(&b);
+            }
         } else if (k == 'd' || k == K_DEL) {
             q_delete(qsel, qsel);
         } else if (k == 'D') {
@@ -2006,7 +2036,7 @@ static int do_key(int k) {
             if (confirm(c)) { if (g == qgen) q_delete(0, Q.n - 1); else say("Queue changed - try again"); }
         }
     } else if (focus == 0 && k == 'D') say("Switch to the queue (Tab) to clear it");
-    if (k == 'n' || k == 'p' || k == ' ' || k == ',' || k == '.' || k == '+' || k == '-' || k == '=' || (focus == 1 && (k == '\n' || k == '\r'))) safe_refresh(0);
+    if (k == 'n' || k == 'p' || k == ' ' || k == 'm' || k == 'S' || k == 'z' || k == ',' || k == '.' || k == '+' || k == '-' || k == '=' || (focus == 1 && (k == '\n' || k == '\r'))) safe_refresh(0);
     return 0;
 }
 
@@ -2855,6 +2885,32 @@ static void group_ui(void) {
     }
     foot_override = NULL;
 }
+/* ---- presets: /Presets lists <preset id=".." name=".."/>, /Preset?id=N plays one */
+static void preset_ui(void) {
+    Buf b = {0}; char ids[9][16], line[700]; int n = 0;
+    if (call(&b, "/Presets", NULL) < 0) { say("Error: %s", ERR); bfree(&b); return; }
+    int l = snprintf(line, sizeof line, "Presets - 1-9 plays, other key closes:");
+    Tag t; const char *p = b.p;
+    while (n < 9 && (p = xml_next(p, &t))) {
+        if (!tag_is(&t, "preset")) continue;
+        char *id = tag_attr(&t, "id"), *nm = tag_attr(&t, "name");
+        if (id) {
+            cpy(ids[n], sizeof ids[n], id);
+            if (l < (int)sizeof line) l += snprintf(line + l, sizeof line - l, "  %d %s", n + 1, nm ? nm : id);
+            n++;
+        }
+        free(id); free(nm);
+    }
+    bfree(&b);
+    if (!n) { say("No presets on this player"); return; }
+    foot_override = line; foot_attr = A_REV; draw();
+    int k = modal_key(1); foot_override = NULL;
+    if (k >= '1' && k < '1' + n) {
+        Buf r = {0};
+        if (call(&r, "/Preset", "id", ids[k - '1'], NULL) < 0) say("Error: %s", ERR); else say("Preset %c", k);
+        bfree(&r); safe_refresh(0);
+    }
+}
 static void no_player_help(void) {
     char path[1024]; if (CFG.cfgpath[0]) cpy(path, sizeof path, CFG.cfgpath); else cfg_default_path(path, sizeof path);
     fprintf(stderr,
@@ -2988,7 +3044,7 @@ static void usage(FILE *o) {
           "             BLUPLAY_DB_OFFSET, BLUPLAY_RANDOM, BLUPLAY_SHUFFLE, BLUPLAY_REPEAT,\n"
           "             BLUPLAY_DISCOVERY, BLUPLAY_CONFIG\n"
           "Command-line flags override the environment, which overrides the config file.\n"
-          "Press ? inside the player for key bindings.\n", o);
+          "Press ? inside the player for key bindings (e.g. m mute, S stop, z sleep timer, P presets, J/K move in queue).\n", o);
 }
 static int start_server(char **files, int nf, char ***urls_out) {
     char ip[64];

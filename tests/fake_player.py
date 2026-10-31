@@ -3,7 +3,7 @@
 
 Implements the subset of the BluOS HTTP API that bluplay uses (/Status with long-poll,
 /SyncStatus, /Playlist, /Browse, /Add, /Play, /Pause, /Skip, /Back, /Volume, /Delete,
-/Clear, /Reindex) on 127.0.0.1, backed by a small invented music library.
+/Clear, /Reindex, /Stop, /Move, /Sleep, /Presets, /Preset, /Volume?mute) on 127.0.0.1, backed by a small invented music library.
 
 usage: fake_player.py [PORT]            (default 11000)
 env:   FAKE_QN=N    initial queue length (default 4)
@@ -32,7 +32,9 @@ def tfile(i, k): return "%s/%s/%s.flac" % (MUSIC_ROOT, ALBUMS[i]["n"], ALBUMS[i]
 def make_queue(n): return [dict(t="Track %d" % (i + 1), a="Queue Artist", b="Queue Album", f="%s/queue/%02d.flac" % (MUSIC_ROOT, i + 1)) for i in range(n)]
 
 Q = make_queue(int(os.environ.get("FAKE_QN", "4")))
-S = {"state": "play", "vol": 40, "db": -40, "pid": 1, "song": 0, "base": 0.0, "t0": time.time(), "idx_t0": 0, "idx_dur": 0, "shuffle": 0, "repeat": 2}
+S = {"state": "play", "vol": 40, "db": -40, "pid": 1, "song": 0, "base": 0.0, "t0": time.time(), "idx_t0": 0, "idx_dur": 0, "shuffle": 0, "repeat": 2, "mute": 0, "sleep": 0}
+PRESETS = [dict(id=1, name="Radio One"), dict(id=2, name="Jazz & Blues")]   # /Presets, /Preset?id=N
+SLEEPS = [15, 30, 45, 60, 90, 0]   # each /Sleep steps the timer
 DELLOG = []
 
 def secs(): return int(S["base"] + (time.time() - S["t0"] if S["state"] == "play" else 0))
@@ -46,9 +48,10 @@ def idxn():
 def core():
     s = Q[S["song"]] if 0 <= S["song"] < len(Q) else None
     return ("<state>%s</state><pid>%d</pid><song>%d</song><title1>%s</title1><title2>%s</title2><title3>%s</title3>"
-            "<volume>%d</volume><db>%d</db><totlen>200</totlen><indexing>%d</indexing><streamFormat>FLAC 16/44.1</streamFormat><shuffle>%d</shuffle><repeat>%d</repeat>%s") % (
+            "<volume>%d</volume><db>%d</db><totlen>200</totlen><indexing>%d</indexing><streamFormat>FLAC 16/44.1</streamFormat><shuffle>%d</shuffle><repeat>%d</repeat><mute>%d</mute>%s<sleep>%s</sleep>%s") % (
         S["state"], S["pid"], S["song"], escape(s["t"]) if s else "", escape(s["a"]) if s else "", escape(s["b"]) if s else "",
-        S["vol"], S["db"], idxn(), S["shuffle"], S["repeat"], ("<fn>%s</fn>" % escape(s["f"])) if s else "")
+        S["vol"], S["db"], idxn(), S["shuffle"], S["repeat"], S["mute"], ("<muteDb>%d</muteDb>" % S["db"]) if S["mute"] else "",
+        S["sleep"] or "", ("<fn>%s</fn>" % escape(s["f"])) if s else "")
 def etag(c): return hashlib.md5(c.encode()).hexdigest()
 def sect(n): return n[:1].upper() if n[:1].isalpha() and n[:1].isascii() else "#"
 def aitem(i):
@@ -140,9 +143,25 @@ class H(http.server.BaseHTTPRequestHandler):
             S["state"] = "play"; bump(); x = "<state>play</state>"
         elif p == "/Clear": Q.clear(); S["pid"] += 1; S["song"] = -1; bump(); x = "<playlist/>"
         elif p == "/Browse": x = browse(g("key", "LocalMusic:"))
-        elif p == "/Volume":
+        elif p == "/Volume" and "mute" not in qs:
             if "db" in qs: S["db"] = max(-80, min(0, S["db"] + int(g("db")))); S["vol"] = S["db"] + 80
             bump(); x = '<volume db="%d">%d</volume>' % (S["db"], S["vol"])
+        elif p == "/Volume" and "mute" in qs:   # real player: level kept, reply db="-100" mute="1" muteDb=..
+            S["mute"] = int(g("mute")); bump(); x = '<volume db="%d" mute="%d">%d</volume>' % (-100 if S["mute"] else S["db"], S["mute"], 0 if S["mute"] else S["vol"])
+        elif p == "/Stop": setpos(0); S["state"] = "stop"; bump(); x = "<state>stop</state>"
+        elif p == "/Sleep":
+            S["sleep"] = SLEEPS[(SLEEPS.index(S["sleep"]) + 1) % len(SLEEPS)]; bump(); x = "<sleep>%s</sleep>" % (S["sleep"] or "")
+        elif p == "/Move":   # 0-based song ids, as on the real player (verified: Move?old=0&new=1 swapped rows 0 and 1, playlist id +1)
+            o, n = int(g("old")), int(g("new")); Q.insert(n, Q.pop(o)); S["pid"] += 1
+            if S["song"] == o: S["song"] = n
+            elif o < S["song"] <= n: S["song"] -= 1
+            elif n <= S["song"] < o: S["song"] += 1
+            bump(); x = "<moved>moved</moved>"
+        elif p == "/Presets": x = '<presets prid="0">%s</presets>' % "".join('<preset id="%d" name=%s url="x"/>' % (q["id"], qa(q["name"])) for q in PRESETS)
+        elif p == "/Preset":
+            q = [q for q in PRESETS if q["id"] == int(g("id", "0"))]
+            if q: Q[:] = [dict(t=q[0]["name"], a="Preset", b="Radio", f="")]; S["pid"] += 1; S["song"] = 0; S["state"] = "play"; setpos(0)
+            bump(); x = "<state>play</state>"
         elif p in ("/Shuffle", "/Repeat"):
             k = p[1:].lower(); S[k] = int(g("state", "0")); bump(); x = '<playlist shuffle="%d" repeat="%d"/>' % (S["shuffle"], S["repeat"])
         elif p == "/Pause":

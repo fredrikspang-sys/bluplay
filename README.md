@@ -204,6 +204,10 @@ Global (both panes):
 | `,` / `.` | seek back / forward 10 s (tracks with a known length; not radio/streams) |
 | `s` | shuffle on/off (player shuffles the current queue's play order) |
 | `t` | repeat: off -> queue -> track -> off (`r` was taken: reload folder) |
+| `m` | mute on/off (the volume level is kept; `MUTED` in the top line) |
+| `S` | stop (`Space` starts again) |
+| `z` | sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off (`sleep Nm` in the top line) |
+| `P` | presets: list the player's presets, `1`-`9` plays one |
 | `R` | random mode on/off |
 | `I` | reindex the player's library (asks y/n) |
 | `G` | group players: list others on the network, `1`-`9` adds/removes one (see [Multi-room grouping](#multi-room-grouping)) |
@@ -231,6 +235,7 @@ Queue pane:
 | `d`, `Delete` | remove the selected track (or, with a selection, the selected tracks after y/n) |
 | `D` | clear the whole queue (or remove the selection), after y/n |
 | `Shift`+`Up`/`Down`/`PgUp`/`PgDn`/`Home`/`End` | select a range from the anchor |
+| `J` / `K` | move the selected track down / up one place |
 | `v` | toggle select mode (for terminals that do not send Shift+arrows): move to extend, `v` or `Esc` ends |
 
 Confirmation prompts accept `y`/`Y`; any other key cancels.
