@@ -38,6 +38,8 @@ SLEEPS = [15, 30, 45, 60, 90, 0]   # each /Sleep steps the timer
 DELLOG = []
 
 def secs(): return int(S["base"] + (time.time() - S["t0"] if S["state"] == "play" else 0))
+MLAG = {"lag": 0.0, "t": 0.0, "old": 0}   # /_x?mutelag=S: /Status reports the previous mute value for S seconds after a change (like the real player)
+def smute(): return MLAG["old"] if time.time() < MLAG["t"] + MLAG["lag"] else S["mute"]
 def setpos(b=0.0): S["base"] = b; S["t0"] = time.time()
 def bump():
     with COND: COND.notify_all()
@@ -50,7 +52,7 @@ def core():
     return ("<state>%s</state><pid>%d</pid><song>%d</song><title1>%s</title1><title2>%s</title2><title3>%s</title3>"
             "<volume>%d</volume><db>%d</db><totlen>200</totlen><indexing>%d</indexing><streamFormat>FLAC 16/44.1</streamFormat><shuffle>%d</shuffle><repeat>%d</repeat><mute>%d</mute>%s<sleep>%s</sleep>%s") % (
         S["state"], S["pid"], S["song"], escape(s["t"]) if s else "", escape(s["a"]) if s else "", escape(s["b"]) if s else "",
-        S["vol"], S["db"], idxn(), S["shuffle"], S["repeat"], S["mute"], ("<muteDb>%d</muteDb>" % S["db"]) if S["mute"] else "",
+        S["vol"], S["db"], idxn(), S["shuffle"], S["repeat"], smute(), ("<muteDb>%d</muteDb>" % S["db"]) if smute() else "",
         S["sleep"] or "", ("<fn>%s</fn>" % escape(s["f"])) if s else "")
 def etag(c): return hashlib.md5(c.encode()).hexdigest()
 def sect(n): return n[:1].upper() if n[:1].isalpha() and n[:1].isascii() else "#"
@@ -113,6 +115,8 @@ class H(http.server.BaseHTTPRequestHandler):
             if "song" in qs: S["song"] = int(g("song")); setpos(0)
             if "state" in qs: setpos(secs()); S["state"] = g("state")
             if "vol" in qs: S["vol"] = int(g("vol")); S["db"] = S["vol"] - 80
+            if "mutelag" in qs: MLAG["lag"] = float(g("mutelag"))
+            if "truemute" in qs: x = "<mute>%d</mute>" % S["mute"]
             if "dellog" in qs: x = "<dellog>%s</dellog>" % "".join('<id id="%d"/>' % i for i in DELLOG)
             bump(); x = x or "<ok/>"
         elif p == "/Reindex":
@@ -147,7 +151,8 @@ class H(http.server.BaseHTTPRequestHandler):
             if "db" in qs: S["db"] = max(-80, min(0, S["db"] + int(g("db")))); S["vol"] = S["db"] + 80
             bump(); x = '<volume db="%d">%d</volume>' % (S["db"], S["vol"])
         elif p == "/Volume" and "mute" in qs:   # real player: level kept, reply db="-100" mute="1" muteDb=..
-            S["mute"] = int(g("mute")); bump(); x = '<volume db="%d" mute="%d">%d</volume>' % (-100 if S["mute"] else S["db"], S["mute"], 0 if S["mute"] else S["vol"])
+            MLAG["old"] = smute(); MLAG["t"] = time.time(); S["mute"] = int(g("mute")); bump()
+            x = ('<volume db="-100" mute="1" muteVolume="%d" muteDb="%d">0</volume>' % (S["vol"], S["db"])) if S["mute"] else ('<volume db="%d" mute="0">%d</volume>' % (S["db"], S["vol"]))
         elif p == "/Stop": setpos(0); S["state"] = "stop"; bump(); x = "<state>stop</state>"
         elif p == "/Sleep":
             S["sleep"] = SLEEPS[(SLEEPS.index(S["sleep"]) + 1) % len(SLEEPS)]; bump(); x = "<sleep>%s</sleep>" % (S["sleep"] or "")

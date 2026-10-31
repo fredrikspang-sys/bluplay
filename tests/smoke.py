@@ -130,6 +130,9 @@ try:
             key(b"r"); ok("UI: r cycles repeat to %s" % nm, wait(lambda: "<repeat>%d</repeat>" % v in srv("/Status") and ("Repeat: " + nm) in scr.display[2]), scr.display[2])
         key(b"m"); ok("UI: m mutes (level kept)", wait(lambda: "<mute>1</mute>" in srv("/Status") and " MUTED" in scr.display[1]) and status()["db"] == -40, scr.display[1])
         key(b"m"); ok("UI: m again unmutes", wait(lambda: "<mute>0</mute>" in srv("/Status") and "MUTED" not in scr.display[1]), scr.display[1])
+        srv("/_x?mutelag=2"); key(b"m", 0.15); key(b"m", 0.3)
+        ok("UI: m m quickly toggles (Status lags)", "<mute>0</mute>" in srv("/_x?truemute=1") and "MUTED" not in scr.display[1], scr.display[1])
+        srv("/_x?mutelag=0"); pump(2.2)
         for v in ("15", "30", "45", "60", "90"):
             key(b"z"); ok("UI: z sets sleep %s min" % v, wait(lambda: "<sleep>%s</sleep>" % v in srv("/Status") and ("sleep %sm" % v) in scr.display[1]), scr.display[1])
         key(b"z"); ok("UI: z cycles sleep back to off", wait(lambda: "<sleep></sleep>" in srv("/Status") and "sleep " not in scr.display[1]), scr.display[1])

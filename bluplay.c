@@ -778,6 +778,8 @@ typedef struct {
     char mutedb[32];
 } Status;
 static Status S, LASTPOLL; static double st_rx, lastpoll_rx;
+static double mute_hold; static int mute_hold_v;   /* after m: trust the /Volume reply over /Status <mute> (which lags ~1-2 s) until mono() >= mute_hold */
+static double mono(void);
 
 static void parse_status(const char *xml, Status *st) {
     memset(st, 0, sizeof *st); st->ok = 1; st->song = -1;
@@ -802,7 +804,7 @@ static void parse_status(const char *xml, Status *st) {
     cpy(st->album, sizeof st->album, t3[0] ? t3 : album);
     st->vol = toi(vol, 0); st->secs = toi(secs, 0); st->tot = toi(tot, 0); st->song = toi(song, -1); st->indexing = toi(ind, 0); if (st->indexing < 0) st->indexing = 0;
     st->shuffle = toi(shf, 0) == 1; st->repeat = rep[0] ? toi(rep, -1) : -1; if (st->repeat > 2) st->repeat = -1;
-    st->mute = toi(mut, 0) == 1; st->sleep = toi(slp, 0); if (st->sleep < 0) st->sleep = 0;
+    st->mute = toi(mut, 0) == 1; if (mono() < mute_hold) st->mute = mute_hold_v; st->sleep = toi(slp, 0); if (st->sleep < 0) st->sleep = 0;
     cpy(st->fmt, sizeof st->fmt, sf[0] ? sf : quality);
     fmt_text(st->format, sizeof st->format, st->fn, sf, quality);
     Meta m;
@@ -1951,7 +1953,16 @@ static int do_key(int k) {
         int r = S.repeat == 2 || S.repeat < 0 ? 0 : S.repeat == 0 ? 1 : 2; char v[16]; snprintf(v, sizeof v, "%d", r);
         c_call("/Repeat", "state", v); say("Repeat: %s", REPEAT_NAME[r]);
     }
-    else if (k == 'm') { c_call("/Volume", "mute", S.mute ? "0" : "1"); say("Mute: %s", S.mute ? "OFF" : "ON"); }
+    else if (k == 'm') {   /* set the mute state from the /Volume reply right away: /Status lags, and a quick 2nd m must toggle back */
+        Buf b = {0}; Tag t;
+        if (call(&b, "/Volume", "mute", S.mute ? "0" : "1", NULL) < 0) say("Error: %s", ERR);
+        else {
+            char *m = xml_root(b.p ? b.p : "", &t) && tag_is(&t, "volume") ? tag_attr(&t, "mute") : NULL, *md = m ? tag_attr(&t, "muteDb") : NULL;
+            if (m) { S.mute = toi(m, 0) == 1; if (md) cpy(S.mutedb, sizeof S.mutedb, md); mute_hold_v = S.mute; mute_hold = mono() + 2; }
+            free(m); free(md); say("Mute: %s", S.mute ? "ON" : "OFF");
+        }
+        bfree(&b);
+    }
     else if (k == 'S') { Buf b = {0}; if (call(&b, "/Stop", NULL) < 0) say("Error: %s", ERR); bfree(&b); }
     else if (k == 'z') {   /* each /Sleep steps the timer: 15, 30, 45, 60, 90 min, off */
         Buf b = {0};
