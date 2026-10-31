@@ -24,6 +24,14 @@ jobs:
       - name: tools
         run: |
           set -e
+          # Debian 11 left security support: deb.debian.org/debian-security 404s for bullseye-security,
+          # so point apt at archive.debian.org (Release files there are expired, hence Check-Valid-Until).
+          rm -f /etc/apt/sources.list.d/debian.sources
+          printf '%s\n' \
+            'deb http://archive.debian.org/debian bullseye main' \
+            'deb http://archive.debian.org/debian bullseye-updates main' \
+            'deb http://archive.debian.org/debian-security bullseye-security main' > /etc/apt/sources.list
+          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
           apt-get update
           apt-get install -y --no-install-recommends build-essential git xz-utils curl ca-certificates file
           curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" | tar xz -C /usr/local/bin nfpm
