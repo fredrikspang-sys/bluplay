@@ -127,7 +127,7 @@ try:
         key(b"s"); ok("UI: s turns shuffle on", wait(lambda: "<shuffle>1</shuffle>" in srv("/Status") and "Shuffle: ON" in scr.display[2]), scr.display[2])
         key(b"s"); ok("UI: s again turns it off", wait(lambda: "<shuffle>0</shuffle>" in srv("/Status") and "Shuffle: OFF" in scr.display[2]), scr.display[2])
         for v, nm in ((0, "queue"), (1, "track"), (2, "off")):
-            key(b"t"); ok("UI: t cycles repeat to %s" % nm, wait(lambda: "<repeat>%d</repeat>" % v in srv("/Status") and ("Repeat: " + nm) in scr.display[2]), scr.display[2])
+            key(b"r"); ok("UI: r cycles repeat to %s" % nm, wait(lambda: "<repeat>%d</repeat>" % v in srv("/Status") and ("Repeat: " + nm) in scr.display[2]), scr.display[2])
         key(b"m"); ok("UI: m mutes (level kept)", wait(lambda: "<mute>1</mute>" in srv("/Status") and " MUTED" in scr.display[1]) and status()["db"] == -40, scr.display[1])
         key(b"m"); ok("UI: m again unmutes", wait(lambda: "<mute>0</mute>" in srv("/Status") and "MUTED" not in scr.display[1]), scr.display[1])
         for v in ("15", "30", "45", "60", "90"):

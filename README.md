@@ -203,7 +203,7 @@ Global (both panes):
 | `+` or `=` / `-` | volume up / down 2 dB |
 | `,` / `.` | seek back / forward 10 s (tracks with a known length; not radio/streams) |
 | `s` | shuffle on/off (player shuffles the current queue's play order) |
-| `t` | repeat: off -> queue -> track -> off (`r` was taken: reload folder) |
+| `r` | repeat: off -> queue -> track -> off |
 | `m` | mute on/off (the volume level is kept; `MUTED` in the top line) |
 | `S` | stop (`Space` starts again) |
 | `z` | sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off (`sleep Nm` in the top line) |
@@ -219,13 +219,12 @@ Library pane:
 
 | Key | Action |
 |---|---|
-| `Enter`, `l`, `Right` | open folder/album; on a track: play it now |
+| `Enter`, `l`, `Right` | open folder/album (always fetched fresh from the player, so `h` then `Enter` refreshes); on a track: play it now |
 | `h`, `Backspace`, `Left` | clear the filter, or go up one level |
 | `a` | add the selected item (track, album or folder) to the end of the queue |
 | `A` | play the selected item now (inserted after the current track; the queue is kept) |
 | `g` + letter | jump to the first entry starting with that letter; `g` + `0` or `#`: first entry not starting with a letter; `Esc` cancels |
 | `/` | filter by substring (type, then `Enter`; `Esc` cancels) |
-| `r` | reload the current list from the player |
 
 Queue pane:
 

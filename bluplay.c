@@ -1254,12 +1254,12 @@ static const char *HELP_LINES[] = {
     "g + letter    jump to the first entry starting with that letter (case-insensitive);",
     "              g + 0 or # = first entry not starting with a letter. Esc cancels.",
     "/             filter (substring; h/Backspace clears it)",
-    "r             reload the current folder (the album list is fetched again)",
+    "              re-opening a folder (h, then Enter) fetches it again from the player",
     "I             reindex the player's library (y/n); progress 'Indexing: N' at the bottom;",
     "              when done the album list is reloaded. From a shell: bluplay --reindex",
     "Format        the playing track shows its format (e.g. FLAC 24 bit 192 kHz); in the queue the selected track's is shown.",
     "s             shuffle ON/OFF (the player shuffles the play order of the current queue)",
-    "t             repeat: off -> queue -> track -> off (off = play the queue only once)",
+    "r             repeat: off -> queue -> track -> off (off = play the queue only once)",
     "m             mute ON/OFF (the volume level is kept; MUTED in the top line)",
     "S             stop (space resumes from the start of the track)",
     "z             sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off ('sleep Nm' in the top line)",
@@ -1497,6 +1497,7 @@ static int open_level(const char *key, const char *title, int flat) {
     if (nstack >= 32) return fail("too deep");
     Level *L = &stack[nstack]; memset(L, 0, sizeof *L);
     cpy(L->title, sizeof L->title, title); cpy(L->key, sizeof L->key, key); L->flat = flat; L->items = &L->own;
+    L->reload = 1;   /* re-opening always fetches the list from the player again (the album list too) */
     if (flat) { nstack++; int r = load(L); nstack--; if (r < 0) { level_free(L); return -1; } }
     else if (load(L) < 0) { level_free(L); return -1; }
     nstack++; return 0;
@@ -1945,7 +1946,7 @@ static int do_key(int k) {
     else if (k == '+' || k == '-' || k == '=') c_call("/Volume", "db", k == '-' ? "-2" : "2");
     else if (k == 'R') rnd_toggle();
     else if (k == 's') { c_call("/Shuffle", "state", S.shuffle ? "0" : "1"); say("Shuffle: %s", S.shuffle ? "OFF" : "ON"); }
-    else if (k == 't') {   /* off(2) -> queue(0) -> track(1) -> off(2) */
+    else if (k == 'r') {   /* off(2) -> queue(0) -> track(1) -> off(2) */
         int r = S.repeat == 2 || S.repeat < 0 ? 0 : S.repeat == 0 ? 1 : 2; char v[16]; snprintf(v, sizeof v, "%d", r);
         c_call("/Repeat", "state", v); say("Repeat: %s", REPEAT_NAME[r]);
     }
@@ -1981,10 +1982,6 @@ static int do_key(int k) {
     else if (focus == 0 && k == '/') {
         char f[256];
         if (prompt("Filter: ", f, sizeof f)) { cpy(L->flt, sizeof L->flt, f); L->sel = 0; }
-    }
-    else if (focus == 0 && k == 'r') {
-        L->reload = 1;
-        if (load(L) == 0) say("Reloaded"); else say("Error: %s", ERR);
     }
     else if (focus == 0 && items_n > 0) {
         if (L->sel > items_n - 1) L->sel = items_n - 1;
