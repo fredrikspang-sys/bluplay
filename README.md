@@ -219,12 +219,13 @@ Library pane:
 
 | Key | Action |
 |---|---|
-| `Enter`, `l`, `Right` | open folder/album (always fetched fresh from the player, so `h` then `Enter` refreshes); on a track: play it now |
+| `Enter`, `l`, `Right` | open folder/album (the album list is kept in memory and re-opens instantly; other folders are fetched when opened); on a track: play it now |
 | `h`, `Backspace`, `Left` | clear the filter, or go up one level |
 | `a` | add the selected item (track, album or folder) to the end of the queue |
 | `A` | play the selected item now (inserted after the current track; the queue is kept) |
 | `g` + letter | jump to the first entry starting with that letter; `g` + `0` or `#`: first entry not starting with a letter; `Esc` cancels |
 | `/` | filter by substring (type, then `Enter`; `Esc` cancels) |
+| `u` | update: fetch the current list again from the player (the album list too; it is also refetched automatically after indexing) |
 
 Queue pane:
 

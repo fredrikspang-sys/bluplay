@@ -1254,7 +1254,9 @@ static const char *HELP_LINES[] = {
     "g + letter    jump to the first entry starting with that letter (case-insensitive);",
     "              g + 0 or # = first entry not starting with a letter. Esc cancels.",
     "/             filter (substring; h/Backspace clears it)",
-    "              re-opening a folder (h, then Enter) fetches it again from the player",
+    "u             update: fetch the current list again from the player (in the album list:",
+    "              the whole album list; in the queue: the queue). The album list is kept",
+    "              in memory and re-opens instantly; it is also refetched after indexing.",
     "I             reindex the player's library (y/n); progress 'Indexing: N' at the bottom;",
     "              when done the album list is reloaded. From a shell: bluplay --reindex",
     "Format        the playing track shows its format (e.g. FLAC 24 bit 192 kHz); in the queue the selected track's is shown.",
@@ -1497,7 +1499,6 @@ static int open_level(const char *key, const char *title, int flat) {
     if (nstack >= 32) return fail("too deep");
     Level *L = &stack[nstack]; memset(L, 0, sizeof *L);
     cpy(L->title, sizeof L->title, title); cpy(L->key, sizeof L->key, key); L->flat = flat; L->items = &L->own;
-    L->reload = 1;   /* re-opening always fetches the list from the player again (the album list too) */
     if (flat) { nstack++; int r = load(L); nstack--; if (r < 0) { level_free(L); return -1; } }
     else if (load(L) < 0) { level_free(L); return -1; }
     nstack++; return 0;
@@ -1983,6 +1984,11 @@ static int do_key(int k) {
         char f[256];
         if (prompt("Filter: ", f, sizeof f)) { cpy(L->flt, sizeof L->flt, f); L->sel = 0; }
     }
+    else if (focus == 0 && k == 'u') {
+        L->reload = 1;
+        if (load(L) == 0) say("Updated"); else say("Error: %s", ERR);
+    }
+    else if (focus == 1 && k == 'u') { aj_reconcile(); say("Updated"); }
     else if (focus == 0 && items_n > 0) {
         if (L->sel > items_n - 1) L->sel = items_n - 1;
         Item *it = vi(L->sel);

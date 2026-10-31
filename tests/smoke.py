@@ -27,7 +27,7 @@ def free_port(kind=socket.SOCK_STREAM):
 
 PORT = free_port(); MPORT = free_port(socket.SOCK_DGRAM); DEAD = free_port(socket.SOCK_DGRAM)
 TMP = tempfile.mkdtemp(prefix="bluplay-test-")
-fake = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_player.py"), str(PORT)], env=dict(os.environ, FAKE_QN="20"),
+fake = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_player.py"), str(PORT)], env=dict(os.environ, FAKE_QN="20", FAKE_LOG=os.path.join(TMP, "req.log")),
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 mdns = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_mdns.py"), str(MPORT),
                          "Living Room=127.0.0.1:%d" % PORT, "Kitchen=127.0.0.2:%d/_musp" % PORT],
@@ -153,7 +153,12 @@ try:
         ok("UI: g+letter jumps", wait(lambda: any(l.startswith("Tango") for l in scr.display[3:])), text())
         key(b"h"); ok("UI: h to library root", wait(lambda: "Artists" in text() and "Library" in scr.display[2]), scr.display[2])
         key(b"\x1b[C"); key(b"\x1b[D")
+        s0sec = open(os.path.join(TMP, "req.log")).read().count("SEC%3A")
         key(b"j"); key(b"\r"); ok("UI: re-open Albums from root", wait(lambda: "Albums" in scr.display[2] and "Alpha" in text()), scr.display[2])
+        nsec = lambda: open(os.path.join(TMP, "req.log")).read().count("SEC%3A")
+        ok("UI: re-open Albums uses the cache (no album fetch)", nsec() == s0sec, (s0sec, nsec()))
+        key(b"u"); ok("UI: u updates the album list", wait(lambda: "Updated" in text() and nsec() > s0sec), (s0sec, nsec(), scr.display[-1]))
+        key(b"\t"); key(b"u"); ok("UI: u in the queue updates it", wait(lambda: "Updated" in text() and "Queue (" in text()), scr.display[-1]); key(b"\t")
         n0 = qlen(); key(b"\t"); key(b"d")
         ok("UI: Tab + d removes one track", wait(lambda: qlen() == n0 - 1) and wait(lambda: "Queue (%d)" % (n0 - 1) in text()), (n0, qlen()))
         n0 = qlen(); key(b"\x1b[1;2B"); key(b"\x1b[1;2B")
