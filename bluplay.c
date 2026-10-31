@@ -1268,6 +1268,8 @@ static const char *HELP_LINES[] = {
     "S             stop (space resumes from the start of the track)",
     "z             sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off ('sleep Nm' in the top line)",
     "P             presets: lists the player's presets, 1-9 plays one",
+    "w             save the queue as a playlist on the player (asks for a name; same name = overwrite)",
+    "L             saved playlists: Enter loads one (replaces the queue, y/n), d deletes one (y/n), Esc closes",
     "J / K         in the queue: move the selected track down / up one place",
     "R             random play ON/OFF: keeps the queue topped up with random tracks from the whole library",
     "              (<3 left after the current one => fill up to 5; played tracks it added are removed; OFF leaves the queue).",
@@ -1927,6 +1929,8 @@ static int seek_to(int s, const Status *st) {   /* /Play?seek=N (absolute), clam
 static void safe_refresh(int force) { if (refresh(force) < 0) say("Error: %s", ERR); }
 static void group_ui(void);
 static void preset_ui(void);
+static void pl_save(void);
+static void pl_ui(void);
 static int do_key(int k) {
     int sh = k == K_SUP || k == K_SDOWN || k == K_SPGUP || k == K_SPGDN || k == K_SHOME || k == K_SEND;   /* Shift+movement = extend selection */
     if (sh) k = k == K_SUP ? K_UP : k == K_SDOWN ? K_DOWN : k == K_SPGUP ? K_PGUP : k == K_SPGDN ? K_PGDN : k == K_SHOME ? K_HOME : K_END;
@@ -1971,6 +1975,8 @@ static int do_key(int k) {
         bfree(&b);
     }
     else if (k == 'P') preset_ui();
+    else if (k == 'w') pl_save();
+    else if (k == 'L') pl_ui();
     else if ((k == ',' || k == '.') && seek_to(pos_now() + (k == '.' ? 10 : -10), &S) < 0) say("Error: %s", ERR);
     else if (k == '?') help_screen();
     else if (k == 'G') group_ui();
@@ -2924,6 +2930,98 @@ static void preset_ui(void) {
         if (call(&r, "/Preset", "id", ids[k - '1'], NULL) < 0) say("Error: %s", ERR); else say("Preset %c", k);
         bfree(&r); safe_refresh(0);
     }
+}
+/* ---- saved playlists (BluOS built-in): /Save?name= saves the queue; the player lists them under /Browse?key=BluOS:
+   (same names as /Playlists). Each item carries the player's own playURL (/Load?service=BluOS&name=..) and a
+   contextMenuKey whose menu has a type="delete" actionURL (/Delete?name=..&service=BluOS) - bluplay uses those
+   URLs as given instead of building them (shapes verified on a NAD player, BluOS 4.x). */
+static void pl_save(void) {
+    char nm[200];
+    if (!Q.n) { say("The queue is empty - nothing to save"); return; }
+    if (!prompt("Save queue as playlist: ", nm, sizeof nm)) { say("Cancelled"); return; }
+    char *t = trim(nm);
+    if (!*t) { say("Cancelled (empty name)"); return; }
+    Buf b = {0};
+    if (call(&b, "/Save", "name", t, NULL) < 0) say("Error: %s", ERR);
+    else { char *e = xml_any_text(b.p, "entries"); say("Saved playlist '%s' (%d tracks)", t, e ? toi(e, 0) : Q.n); free(e); }
+    bfree(&b);
+}
+static int pl_list(Items *out) {   /* saved playlists = items with a playURL under BluOS: */
+    Items all = {0};
+    if (browse("BluOS:", &all, NULL, 0) < 0) { items_free(&all); return -1; }
+    for (int i = 0; i < all.n; i++)
+        if (all.v[i].text && all.v[i].purl && *all.v[i].purl) { items_push(out, &all.v[i]); memset(&all.v[i], 0, sizeof all.v[i]); }
+    items_free(&all); return 0;
+}
+static char *pl_menu_url(const Item *it, const char *type) {   /* actionURL of a context-menu entry (malloc) or NULL */
+    if (!it->ckey || !*it->ckey) return NULL;
+    Items m = {0}; char *u = NULL;
+    if (browse(it->ckey, &m, NULL, 0) == 0)
+        for (int i = 0; i < m.n && !u; i++) if (!strcmp(Z(m.v[i].type), type) && m.v[i].aurl && *m.v[i].aurl) u = xstrdup(m.v[i].aurl);
+    items_free(&m); return u;
+}
+static int pl_load(const Item *it) { return act(it->purl); }   /* real player: playURL = /Load?service=BluOS&name=NAME (replaces the queue) */
+static void pl_draw(const Items *pl, int sel, const char *foot) {
+    term_size();
+    for (int y = 0; y < MAXH; y++) breset(&rows[y]);
+    char line[400]; int ph = H - 3, top = sel - ph / 2;
+    if (top > pl->n - ph) top = pl->n - ph;
+    if (top < 0) top = 0;
+    snprintf(line, sizeof line, "Saved playlists (%d)", pl->n);
+    rput(0, line, W, A_BOLD | A_UL, 0);
+    for (int k = 0; k < ph; k++) {
+        int i = top + k, y = 1 + k;
+        if (i < pl->n) { snprintf(line, sizeof line, "  %s", Z(pl->v[i].text)); rput(y, line, W, i == sel ? A_REV : 0, 0); }
+        else rput(y, "", W, 0, 0);
+    }
+    rput(H - 2, "", W, 0, 0);
+    rput(H - 1, foot ? foot : "Enter load (replaces the queue)   d delete   Esc/q close", W - 1, foot ? A_REV : A_DIM, 1);
+    flush_frame();
+}
+static int pl_key(void) {   /* K_NONE on signal; resize is handled by the caller's redraw */
+    for (;;) { int k = read_key(-1); if (got_sig) return K_NONE; if (got_winch) { got_winch = 0; return K_IGN; } if (k != K_NONE && k != K_IGN) return k; }
+}
+static void pl_ui(void) {
+    Items pl = {0}; int sel = 0; char foot[400];
+    say("Loading playlists..."); draw();
+    if (pl_list(&pl) < 0) { say("Error: %s", ERR); return; }
+    if (!pl.n) { items_free(&pl); say("No saved playlists on this player (w saves the queue)"); return; }
+    for (;;) {
+        pl_draw(&pl, sel, NULL);
+        int k = pl_key();
+        if (k == K_NONE || k == 27 || k == 'q' || k == 3 || k == 'L' || k == 'h' || k == K_LEFT) break;
+        if (k == 'j' || k == K_DOWN) sel++; else if (k == 'k' || k == K_UP) sel--;
+        else if (k == K_PGDN) sel += 15; else if (k == K_PGUP) sel -= 15;
+        else if (k == K_HOME) sel = 0; else if (k == K_END) sel = pl.n - 1;
+        else if (k == '\n' || k == '\r') {
+            Item *it = &pl.v[sel];
+            if (Q.n) {
+                snprintf(foot, sizeof foot, "Replace the queue (%d tracks) with '%s'? y/n", Q.n, Z(it->text));
+                pl_draw(&pl, sel, foot); int c = pl_key();
+                if (c != 'y' && c != 'Y') continue;
+            }
+            if (pl_load(it) < 0) say("Error: %s", ERR); else say("Playing playlist: %s", Z(it->text));
+            break;
+        } else if (k == 'd' || k == K_DEL) {
+            Item *it = &pl.v[sel];
+            snprintf(foot, sizeof foot, "Delete saved playlist '%s' from the player? y/n", Z(it->text));
+            pl_draw(&pl, sel, foot); int c = pl_key();
+            if (c != 'y' && c != 'Y') continue;
+            char *u = pl_menu_url(it, "delete");
+            if (!u) { say("Error: the player offers no delete for '%s'", Z(it->text)); break; }
+            int r = act(u); free(u);
+            if (r < 0) { say("Error: %s", ERR); break; }
+            say("Deleted playlist: %s", Z(it->text));
+            Items n = {0};
+            if (pl_list(&n) < 0) { items_free(&n); say("Error: %s", ERR); break; }
+            items_free(&pl); pl = n;
+            if (!pl.n) break;
+        }
+        if (sel > pl.n - 1) sel = pl.n - 1;
+        if (sel < 0) sel = 0;
+    }
+    items_free(&pl); force_redraw = 1;
+    aj_reconcile();
 }
 static void no_player_help(void) {
     char path[1024]; if (CFG.cfgpath[0]) cpy(path, sizeof path, CFG.cfgpath); else cfg_default_path(path, sizeof path);

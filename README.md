@@ -208,6 +208,8 @@ Global (both panes):
 | `S` | stop (`Space` starts again) |
 | `z` | sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off (`sleep Nm` in the top line) |
 | `P` | presets: list the player's presets, `1`-`9` plays one |
+| `w` | save the queue as a playlist on the player (asks for a name) |
+| `L` | saved playlists: `Enter` loads one (replaces the queue, asks y/n), `d` deletes one (asks y/n), `Esc` closes |
 | `R` | random mode on/off |
 | `I` | reindex the player's library (asks y/n) |
 | `G` | group players: list others on the network, `1`-`9` adds/removes one (see [Multi-room grouping](#multi-room-grouping)) |

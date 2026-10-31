@@ -3,7 +3,8 @@
 
 Implements the subset of the BluOS HTTP API that bluplay uses (/Status with long-poll,
 /SyncStatus, /Playlist, /Browse, /Add, /Play, /Pause, /Skip, /Back, /Volume, /Delete,
-/Clear, /Reindex, /Stop, /Move, /Sleep, /Presets, /Preset, /Volume?mute) on 127.0.0.1, backed by a small invented music library.
+/Clear, /Reindex, /Stop, /Move, /Sleep, /Presets, /Preset, /Volume?mute,
+/Save, /Playlists, saved playlists under /Browse?key=BluOS:, /Load, /Delete?name=) on 127.0.0.1, backed by a small invented music library.
 
 usage: fake_player.py [PORT]            (default 11000)
 env:   FAKE_QN=N    initial queue length (default 4)
@@ -36,6 +37,7 @@ S = {"state": "play", "vol": 40, "db": -40, "pid": 1, "song": 0, "base": 0.0, "t
 PRESETS = [dict(id=1, name="Radio One"), dict(id=2, name="Jazz & Blues")]   # /Presets, /Preset?id=N
 SLEEPS = [15, 30, 45, 60, 90, 0]   # each /Sleep steps the timer
 DELLOG = []
+SAVED = {}   # saved playlists (/Save?name=): name -> copy of the queue
 
 def secs(): return int(S["base"] + (time.time() - S["t0"] if S["state"] == "play" else 0))
 MLAG = {"lag": 0.0, "t": 0.0, "old": 0}   # /_x?mutelag=S: /Status reports the previous mute value for S seconds after a change (like the real player)
@@ -88,6 +90,17 @@ def browse(k):
     if k.startswith("CMT:"):
         _, i, j = k.split(":")
         return '<browse type="contextMenu"><item actionURL="/Add?playnow=-1&amp;where=last&amp;file=%s" type="add-last" text="Add last"/></browse>' % escape(up.quote(tfile(int(i), int(j))))
+    if k == "BluOS:":   # saved playlists, shaped like the real player's Browse (playURL + contextMenuKey per playlist)
+        return '<browse serviceName="BluOS" type="playlists">%s</browse>' % "".join(
+            '<item browseKey=%s contextMenuKey=%s playURL=%s text=%s type="playlist"/>' % (qa("BluOS:MG/BluOS-Playlist?playlist=" + up.quote(n)),
+                qa("BluOS:CM/BluOS-Playlist?playlist=" + up.quote(n)), qa("/Load?service=BluOS&name=" + up.quote(n)), qa(n))
+            for n in sorted(SAVED))
+    if k.startswith("BluOS:CM/BluOS-Playlist?playlist="):   # same entries as the real player's menu
+        n = up.quote(up.unquote(k.split("=", 1)[1]))
+        return ('<browse serviceName="BluOS" type="contextMenu">'
+                '<item actionURL=%s text="Play now" type="add-now"/><item actionURL=%s text="Add last" type="add-last"/>'
+                '<item actionURL=%s text="Delete" type="delete"/></browse>' % (qa("/Add?clear=0&playlist=%s&playnow=1&service=BluOS&shuffle=0" % n),
+                qa("/Add?playlist=%s&playnow=-1&service=BluOS&where=last" % n), qa("/Delete?name=%s&service=BluOS" % n)))
     return '<browse serviceName="?"></browse>'
 
 GRP = set()   # (ip, port) of grouped players (AddSlave/RemoveSlave)
@@ -126,12 +139,21 @@ class H(http.server.BaseHTTPRequestHandler):
             x = '<playlist length="%d" id="%d">%s</playlist>' % (len(Q), S["pid"], "".join(
                 '<song id="%d"><art>%s</art><alb>%s</alb><title>%s</title><fn>%s</fn></song>' % (i, escape(s["a"]), escape(s["b"]), escape(s["t"]), escape(s["f"]))
                 for i, s in enumerate(Q)))
+        elif p == "/Delete" and "name" in qs:   # delete a saved playlist (real player: /Delete?name=N&service=BluOS -> <deleted>N</deleted>)
+            n = g("name", ""); SAVED.pop(n, None); x = "<deleted>%s</deleted>" % escape(n)
         elif p == "/Delete":
             i = int(g("id", "-1")); DELLOG.append(i)
             if 0 <= i < len(Q):
                 del Q[i]; S["pid"] += 1
                 if i < S["song"]: S["song"] -= 1
             bump(); x = "<deleted>%d</deleted>" % i
+        elif p == "/Save":
+            n = g("name", ""); SAVED[n] = [dict(q) for q in Q]; S["pid"] += 1; bump(); x = "<saved><entries>%d</entries></saved>" % len(Q)   # real player: queue id +1
+        elif p == "/Playlists":
+            x = '<playlists service="BluOS">%s</playlists>' % "".join("<name>%s</name>" % escape(n) for n in sorted(SAVED))
+        elif p == "/Load":   # load a saved playlist: replaces the queue and plays it
+            Q[:] = [dict(q) for q in SAVED.get(g("name"), [])]; S["song"] = 0 if Q else -1; S["state"] = "play" if Q else "stop"; setpos(0)
+            S["pid"] += 1; bump(); x = "<loaded service=\"BluOS\"><entries>%d</entries></loaded>" % len(Q)
         elif p == "/Add":
             if "file" in qs:
                 f = g("file"); Q.append(dict(t=os.path.splitext(os.path.basename(f))[0], a="Added Artist", b="Added Album", f=f))
