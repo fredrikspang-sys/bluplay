@@ -164,6 +164,8 @@ class H(http.server.BaseHTTPRequestHandler):
         elif p == "/Reindex":
             if idxn() == 0: S["idx_t0"] = time.time(); S["idx_dur"] = float(os.environ.get("FAKE_IDX_SECS", "3"))
             x = "<indexing>%d</indexing>" % idxn()
+        elif p == "/Playlist" and "length" in qs:   # real player: /Playlist?length=1 -> length and id only
+            x = "<playlist><length>%d</length><id>%d</id></playlist>" % (len(Q), S["pid"])
         elif p == "/Playlist":
             x = '<playlist length="%d" id="%d">%s</playlist>' % (len(Q), S["pid"], "".join(
                 '<song id="%d"><art>%s</art><alb>%s</alb><title>%s</title><fn>%s</fn></song>' % (i, escape(s["a"]), escape(s["b"]), escape(s["t"]), escape(s["f"]))

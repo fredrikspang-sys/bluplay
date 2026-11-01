@@ -1042,6 +1042,14 @@ static int queue_get(Queue *q) {
     if (get("/Playlist", 5, &b) < 0) { bfree(&b); return -1; }
     queue_parse(b.p, q); bfree(&b); return 0;
 }
+static int queue_meta(int *len, char *id, size_t idcap) {   /* cheap: /Playlist?length=1 -> queue length + playlist id only */
+    Buf b = {0};
+    if (get("/Playlist?length=1", 5, &b) < 0) { bfree(&b); return -1; }
+    char *l = xml_any_text(b.p, "length"), *i = xml_any_text(b.p, "id"); int r = -1;
+    if (l && i && *l && *i) { char *e; long v = strtol(l, &e, 10); if (!*e && v >= 0) { *len = (int)v; cpy(id, idcap, i); r = 0; } }
+    if (r < 0) fail("bad /Playlist?length=1 reply");
+    free(l); free(i); bfree(&b); return r;
+}
 static int queue_eq(const Queue *a, const Queue *b) {
     if (a->n != b->n) return 0;
     for (int i = 0; i < a->n; i++) if (a->v[i].id != b->v[i].id || strcmp(a->v[i].t, b->v[i].t) || strcmp(a->v[i].a, b->v[i].a) || strcmp(a->v[i].b, b->v[i].b) || strcmp(a->v[i].f, b->v[i].f)) return 0;
@@ -1648,7 +1656,9 @@ static void sync_queue(void) {
         if (qsel > Q.n - 1) { qsel = Q.n - 1; } if (qsel < 0) qsel = 0;
     }
 }
-static int stale(void) {
+static int stale(void) {   /* 1 (and queue reloaded) if the player's queue differs from the one shown */
+    int len; char id[32];
+    if (qpid_valid && queue_meta(&len, id, sizeof id) == 0 && len == Q.n && !strcmp(id, qpid)) return 0;   /* same id + length: unchanged */
     Queue nq;
     if (queue_get(&nq) < 0) { say("Error: %s", ERR); return 1; }
     if (queue_eq(&nq, &Q)) { queue_free(&nq); return 0; }
@@ -1672,11 +1682,12 @@ static double rnd_next, rnd_nx;
 static char rnd_mode_env[16];
 static int ours_has(const char *f) { for (int i = 0; i < RND.nours; i++) if (!strcmp(RND.ours[i], f)) return 1; return 0; }
 static void ours_discard(const char *f) { for (int i = 0; i < RND.nours; i++) if (!strcmp(RND.ours[i], f)) { free(RND.ours[i]); RND.ours[i] = RND.ours[--RND.nours]; return; } }
-static int upcoming(void) {
-    int song = S.song, n = Q.n;
+static int upcoming_n(int n) {   /* tracks after the current one in a queue of n */
+    int song = S.song;
     if (!strcmp(S.state, "play") || !strcmp(S.state, "stream") || !strcmp(S.state, "pause") || !strcmp(S.state, "connecting")) return song >= 0 ? (n - 1 - song > 0 ? n - 1 - song : 0) : n;
     return song >= 0 ? (n - song > 0 ? n - song : 0) : n;
 }
+static int upcoming(void) { return upcoming_n(Q.n); }
 static int rnd_add_one(char *name, size_t cap) {
     if (ALBUMS.n <= 0) return fail("no albums in the library");   /* rand() % 0 = SIGFPE */
     for (int tries = 0; tries < 8; tries++) {
@@ -1718,12 +1729,12 @@ static void rnd_fill(int start) {
     if (upcoming() >= RND_MIN && !start) return;
     int first = Q.n, n = 0;
     if (!albums_ok) { say("Loading albums..."); draw(); if (all_albums(0, stack[0].items) < 0) goto err; }
-    while (upcoming() < RND_TARGET && n < RND_TARGET) {
-        char name[600];
+    int qn = Q.n;   /* queue length while adding: only the cheap length query per track, the full queue once at the end */
+    while (upcoming_n(qn) < RND_TARGET && n < RND_TARGET) {
+        char name[600]; char id[32];
         if (rnd_add_one(name, sizeof name) < 0) goto err;
         n++; say("Random: added %s", name);
-        Queue nq; if (queue_get(&nq) < 0) goto err;
-        queue_free(&Q); Q = nq; q_replaced();
+        if (queue_meta(&qn, id, sizeof id) < 0) goto err;
     }
     if (refresh(1) < 0) goto err;
     if (start && n && strcmp(S.state, "play") && strcmp(S.state, "stream") && strcmp(S.state, "pause") && strcmp(S.state, "connecting")) {
