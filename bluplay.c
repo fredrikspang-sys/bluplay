@@ -844,11 +844,14 @@ static void item_from_tag(Item *it, const Tag *t) {
 static int is_dir(const Item *it) { return it->bkey && it->bkey[0] && strcmp(Z(it->type), "track") != 0; }
 static int is_albums_root(const Item *it) { return it->bkey && !strncmp(it->bkey, ALBUMS_PFX, sizeof(ALBUMS_PFX) - 1); }
 
-static int browse(const char *key0, Items *out, char *title, size_t tcap) {   /* follows nextKey */
+static char browse_sk[600];   /* searchKey of the last browse() response ("" if none), e.g. LocalMusic:Search */
+static int browse_q(const char *key0, const char *q, Items *out, char *title, size_t tcap) {   /* follows nextKey; q = search text (first page only) */
     char *key = xstrdup(key0); Buf body = {0};
+    browse_sk[0] = 0;
     for (int i = 0; i < 50; i++) {
         breset(&body);
-        if (call(&body, "/Browse", "key", key, NULL) < 0) { free(key); bfree(&body); return -1; }
+        int rc = q && *q && !i ? call(&body, "/Browse", "key", key, "q", q, NULL) : call(&body, "/Browse", "key", key, NULL);
+        if (rc < 0) { free(key); bfree(&body); return -1; }
         Tag t;
         if (!xml_root(body.p, &t) || !tag_is(&t, "browse")) {
             char *d = xml_any_text(body.p, "detail");
@@ -857,6 +860,7 @@ static int browse(const char *key0, Items *out, char *title, size_t tcap) {   /*
             free(d); free(key); bfree(&body); return -1;
         }
         char *sn = tag_attr(&t, "serviceName"); if (sn && title) cpy(title, tcap, sn); free(sn);
+        if (!i) { char *sk = tag_attr(&t, "searchKey"); cpy(browse_sk, sizeof browse_sk, Z(sk)); free(sk); }
         char *nk = tag_attr(&t, "nextKey");
         const char *p = body.p;
         while ((p = xml_next(p, &t))) if ((t.kind == 1 || t.kind == 3) && tag_is(&t, "item")) { Item it; item_from_tag(&it, &t); items_push(out, &it); }
@@ -865,6 +869,7 @@ static int browse(const char *key0, Items *out, char *title, size_t tcap) {   /*
     }
     free(key); bfree(&body); return 0;
 }
+static int browse(const char *key0, Items *out, char *title, size_t tcap) { return browse_q(key0, NULL, out, title, tcap); }
 static int act(const char *u) {
     Buf b = {0};
     if (get(u, 5, &b) < 0) { bfree(&b); return -1; }
@@ -1168,7 +1173,7 @@ static int read_key(int tmo) {
 }
 
 /* ---------------------------------------------------------------- UI state */
-typedef struct { char title[160]; char key[600]; Items own; Items *items; int sel; char flt[256]; int flat, reload; } Level;
+typedef struct { char title[160]; char key[600]; Items own; Items *items; int sel; char flt[256]; int flat, reload; char q[256], sk[600]; } Level;   /* q = search text (search result levels), sk = the level's searchKey */
 static Level stack[32]; static int nstack;
 static int focus, qsel;
 static Queue Q; static char qpid[32]; static int qpid_valid;
@@ -1240,7 +1245,7 @@ static void rput(int y, const char *text, int w, int attr, int right) {
     fit(r, text, w, right);
     if (attr) bputs(r, "\033[0m");
 }
-static const char *HELP = "Tab switch  Enter open/play  h up  a add  A play now  g+letter jump  / filter  I reindex  ? help  q quit";
+static const char *HELP = "Tab switch  Enter open/play  h up  a add  A play now  g+letter jump  / filter  f search  I reindex  ? help  q quit";
 static const char *HELP_LINES[] = {
     "bluplay " BLUPLAY_VERSION " - help (press any key to close)", "",
     "Start: flat album list (all albums A-Z in one list). h/Backspace = up to the library root (Artists, Songs ...).", "",
@@ -1256,6 +1261,8 @@ static const char *HELP_LINES[] = {
     "g + letter    jump to the first entry starting with that letter (case-insensitive);",
     "              g + 0 or # = first entry not starting with a letter. Esc cancels.",
     "/             filter (substring; h/Backspace clears it)",
+    "f             search the library (or the current service): shows Artists/Albums/Songs... as a new level;",
+    "              Enter opens, a adds, A plays now, h goes back. Empty text or Esc cancels.",
     "u             update: fetch the current list again from the player (in the album list:",
     "              the whole album list; in the queue: the queue). The album list is kept",
     "              in memory and re-opens instantly; it is also refetched after indexing.",
@@ -1494,7 +1501,8 @@ static int load(Level *L) {
         say("%d albums", ALBUMS.n);
     } else {
         Items n = {0};
-        if (browse(L->key, &n, NULL, 0) < 0) { items_free(&n); return -1; }
+        if (browse_q(L->key, L->q, &n, NULL, 0) < 0) { items_free(&n); return -1; }
+        cpy(L->sk, sizeof L->sk, browse_sk);
         items_free(&L->own); L->own = n; L->items = &L->own;
     }
     return 0;
@@ -1506,6 +1514,26 @@ static int open_level(const char *key, const char *title, int flat) {
     if (flat) { nstack++; int r = load(L); nstack--; if (r < 0) { level_free(L); return -1; } }
     else if (load(L) < 0) { level_free(L); return -1; }
     nstack++; return 0;
+}
+
+/* ---- library search (f): /Browse?key=<searchKey>&q=TEXT; the searchKey comes from the nearest level whose response
+ * had one (a service like Qobuz/TuneIn has its own), else LocalMusic:Search. The result menu (Artists, Albums, Songs ...)
+ * is pushed as a normal level, so Enter/a/A/h work as when browsing. */
+#define SEARCH_FALLBACK "LocalMusic:Search"
+static void search_ui(void) {
+    char q[256];
+    if (!prompt("Search: ", q, sizeof q) || !q[0]) { say("Cancelled"); return; }
+    const char *sk = SEARCH_FALLBACK;
+    for (int i = nstack - 1; i >= 0; i--) if (stack[i].sk[0]) { sk = stack[i].sk; break; }
+    if (nstack >= 32) { say("Error: too deep"); return; }
+    Level *L = &stack[nstack]; memset(L, 0, sizeof *L);
+    snprintf(L->title, sizeof L->title, "Search '%.140s'", q); cpy(L->key, sizeof L->key, sk); cpy(L->q, sizeof L->q, q); L->items = &L->own;
+    say("Searching..."); draw();
+    if (load(L) < 0) { level_free(L); say("Search failed: %s", ERR); return; }
+    L->sk[0] = 0;   /* the result menu is not itself a search root: a new f searches from the same service again */
+    for (int i = nstack - 1; i >= 0; i--) if (stack[i].sk[0]) { cpy(L->sk, sizeof L->sk, stack[i].sk); break; }
+    if (!L->own.n) { level_free(L); say("No results for '%.200s'", q); return; }
+    nstack++; say("%d result categories for '%.200s'", L->own.n, q);
 }
 
 static int stale(void);
@@ -2001,6 +2029,7 @@ static int do_key(int k) {
         char f[256];
         if (prompt("Filter: ", f, sizeof f)) { cpy(L->flt, sizeof L->flt, f); L->sel = 0; }
     }
+    else if (focus == 0 && k == 'f') search_ui();
     else if (focus == 0 && k == 'u') {
         L->reload = 1;
         if (load(L) == 0) say("Updated"); else say("Error: %s", ERR);

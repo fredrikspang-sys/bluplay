@@ -62,9 +62,30 @@ def aitem(i):
     a = ALBUMS[i]
     return '<item browseKey=%s contextMenuKey=%s playURL=%s text=%s text2=%s type="album"/>' % (
         qa("ALB:%d" % i), qa("CMA:%d" % i), qa("/Add?playnow=1&album=%d" % i), qa(a["n"]), qa(a["a"]))
-def browse(k):
+def skey(cat, q):   # browseKey of a search category, shaped like the real player's
+    return "LocalMusic:%s/%s" % (cat, up.quote("/library/v1/%ss?expr=" % cat, safe="") + up.quote(q, safe="") + "&service=LocalMusic")
+def search(k, q):
+    """/Browse?key=LocalMusic:Search&q=TEXT -> menu of categories with hits; LocalMusic:Song/... etc. -> the hits"""
+    if k == "LocalMusic:Search":
+        if q == "FAIL": return '<error><detail>search broke</detail></error>'
+        q = q.lower(); cats = []
+        if any(q in a["a"].lower() for a in ALBUMS): cats.append(("Artist", "Artists"))
+        if any(q in a["n"].lower() for a in ALBUMS): cats.append(("Album", "Albums"))
+        if any(q in t.lower() for a in ALBUMS for t in a["tracks"]): cats.append(("Song", "Songs"))
+        return '<browse serviceName="Library" type="menu">%s</browse>' % "".join(
+            '<item browseKey=%s text=%s type="link"/>' % (qa(skey(c, q)), qa(n)) for c, n in cats)
+    cat, rest = k[len("LocalMusic:"):].split("/", 1)
+    q = up.parse_qs(up.unquote(rest).split("?", 1)[1])["expr"][0].lower()
+    if cat == "Album": return '<browse serviceName="Library">%s</browse>' % "".join(aitem(i) for i, a in enumerate(ALBUMS) if q in a["n"].lower())
+    if cat == "Artist": return '<browse serviceName="Library">%s</browse>' % "".join(
+        '<item browseKey=%s text=%s type="artist"/>' % (qa("ART:%d" % i), qa(a["a"])) for i, a in enumerate(ALBUMS) if q in a["a"].lower())
+    return '<browse serviceName="Library" type="tracks">%s</browse>' % "".join(
+        '<item text=%s title=%s type="track" playURL=%s contextMenuKey=%s/>' % (qa(t), qa(t), qa("/Add?playnow=1&file=" + up.quote(tfile(i, j))), qa("CMT:%d:%d" % (i, j)))
+        for i, a in enumerate(ALBUMS) for j, t in enumerate(a["tracks"]) if q in t.lower())
+def browse(k, q=""):
+    if k == "LocalMusic:Search" or k.startswith(("LocalMusic:Artist/", "LocalMusic:Album/", "LocalMusic:Song/")): return search(k, q)
     if k == "LocalMusic:":
-        return ('<browse serviceName="Library"><item browseKey="LocalMusic:bySection:Artist/x" text="Artists" type="link"/>'
+        return ('<browse serviceName="Library" searchKey="LocalMusic:Search"><item browseKey="LocalMusic:bySection:Artist/x" text="Artists" type="link"/>'
                 '<item browseKey="LocalMusic:bySection:Album/x" text="Albums" type="link"/></browse>')
     if k.startswith("LocalMusic:bySection:Album"):
         return '<browse serviceName="Library" type="sections">%s</browse>' % "".join(
@@ -168,7 +189,7 @@ class H(http.server.BaseHTTPRequestHandler):
             else: setpos(secs())
             S["state"] = "play"; bump(); x = "<state>play</state>"
         elif p == "/Clear": Q.clear(); S["pid"] += 1; S["song"] = -1; bump(); x = "<playlist/>"
-        elif p == "/Browse": x = browse(g("key", "LocalMusic:"))
+        elif p == "/Browse": x = browse(g("key", "LocalMusic:"), g("q", ""))
         elif p == "/Volume" and "mute" not in qs:
             if "db" in qs: S["db"] = max(-80, min(0, S["db"] + int(g("db")))); S["vol"] = S["db"] + 80
             bump(); x = '<volume db="%d">%d</volume>' % (S["db"], S["vol"])

@@ -20,6 +20,7 @@ the player indexes, and who want to pick albums and tracks from a keyboard-drive
 - Queue editing: remove one track, a range (Shift+arrows or `v` select mode), or clear the queue — removals show instantly and are synced in the background
 - Transport: play/pause, next, previous, seek ±10 s, volume in dB
 - Type-ahead jump (`g` + letter) and substring filter (`/`)
+- Library search (`f`): artists, albums, songs and composers matching a text, via the player's own search
 - Shows the stream format of the playing track (e.g. `FLAC 24 bit 96 kHz`) and a progress bar in the (reverse-video) now-playing lines
 - Random mode that keeps the queue topped up with random tracks or albums from the whole library
 - Library reindex with progress (`I`, or `bluplay --reindex`)
@@ -227,6 +228,7 @@ Library pane:
 | `A` | play the selected item now (inserted after the current track; the queue is kept) |
 | `g` + letter | jump to the first entry starting with that letter; `g` + `0` or `#`: first entry not starting with a letter; `Esc` cancels |
 | `/` | filter by substring (type, then `Enter`; `Esc` cancels) |
+| `f` | search the library (or the current service, if it has its own search): type, then `Enter`; the results (Artists, Albums, Songs, Composers) open as a new level where `Enter`, `a`, `A` and `h` work as usual; empty text or `Esc` cancels |
 | `u` | update: fetch the current list again from the player (the album list too; it is also refetched automatically after indexing) |
 
 Queue pane:
