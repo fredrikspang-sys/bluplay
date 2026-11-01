@@ -1639,6 +1639,8 @@ static int refresh(int force) {
     Status n;
     if (status_get(&n) < 0) { S = LASTPOLL; st_rx = lastpoll_rx; return -1; }
     S = n; st_rx = mono();
+    int len; char id[32];
+    if (force && qpid_valid && !strcmp(S.pid, qpid) && queue_meta(&len, id, sizeof id) == 0 && len == Q.n && !strcmp(id, qpid)) force = 0;   /* playlist id and length unchanged: keep the queue */
     if (force || !qpid_valid || strcmp(S.pid, qpid)) {
         Queue nq;
         if (queue_get(&nq) < 0) return -1;

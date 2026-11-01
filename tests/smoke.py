@@ -280,6 +280,12 @@ try:
         ky(b"\t"); ky(b"j"); f1 = fullq(); ky(b"\r", 1.0); f2 = fullq()
         ok("UI: Enter in the queue checks it cheaply (no full download)", wt(lambda: status()["song"] == 1) and f2 == f1 and "/Playlist?length=1" in rlog(), (f2, f1))
         code, rw = quit(); ok("UI: random session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
+        srv("/_x?resetq=3&song=0&state=stop"); f0 = fullq()
+        sc, tx, wt, ky, quit = session(BLUPLAY_RANDOM="track")
+        filled = wt(lambda: "Queue (" in tx() and status()["state"] == "play", 15); time.sleep(1.0); nf = fullq() - f0
+        lg = [l for l in rlog().splitlines() if not l.startswith(("/Status", "/Browse", "/_x"))]; ip = max(i for i, l in enumerate(lg) if l.startswith("/Play?id="))
+        ok("UI: random start from stop plays; the refresh after /Play does not re-download the unchanged queue", filled and lg[ip + 1] == "/Playlist?length=1" and nf <= 3, (nf, lg[ip:ip + 3]))
+        code, rw = quit(); ok("UI: second random session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
         srv("/_x?bigsec=160&resetq=3")   # section P: 160 more albums -> ~55 nextKey pages (more than the old 50-page limit)
         sc, tx, wt, ky, quit = session()
         ok("UI: >50 nextKey pages are all loaded", wt(lambda: re.search(r"\b(\d+) albums", tx()) and int(re.search(r"\b(\d+) albums", tx()).group(1)) == 31 + 160, 20), tx())
