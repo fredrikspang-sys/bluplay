@@ -821,12 +821,13 @@ static void dbtxt(const Status *st, char *out, size_t cap) {
 }
 
 /* ---- library */
-typedef struct { char *type, *text, *text2, *bkey, *ckey, *purl, *aurl, *raw, *sk; int ord; } Item;
+typedef struct { char *type, *text, *text2, *bkey, *ckey, *purl, *aurl, *raw, *sk, *lo; int ord; } Item;   /* lo = lowercased text for the filter (lazy) */
 typedef struct { Item *v; int n, cap; } Items;
 static const char *Z(const char *s) { return s ? s : ""; }
-static void item_free(Item *it) { free(it->type); free(it->text); free(it->text2); free(it->bkey); free(it->ckey); free(it->purl); free(it->aurl); free(it->raw); free(it->sk); memset(it, 0, sizeof *it); }
-static void items_free(Items *a) { for (int i = 0; i < a->n; i++) item_free(&a->v[i]); free(a->v); a->v = NULL; a->n = a->cap = 0; }
-static void items_push(Items *a, Item *it) { if (a->n == a->cap) { a->cap = a->cap ? a->cap * 2 : 64; a->v = xrealloc(a->v, a->cap * sizeof(Item)); } a->v[a->n++] = *it; }
+static void item_free(Item *it) { free(it->type); free(it->text); free(it->text2); free(it->bkey); free(it->ckey); free(it->purl); free(it->aurl); free(it->raw); free(it->sk); free(it->lo); memset(it, 0, sizeof *it); }
+static unsigned items_gen;   /* bumped whenever any item list changes (the filter view cache checks it) */
+static void items_free(Items *a) { items_gen++; for (int i = 0; i < a->n; i++) item_free(&a->v[i]); free(a->v); a->v = NULL; a->n = a->cap = 0; }
+static void items_push(Items *a, Item *it) { items_gen++; if (a->n == a->cap) { a->cap = a->cap ? a->cap * 2 : 64; a->v = xrealloc(a->v, a->cap * sizeof(Item)); } a->v[a->n++] = *it; }
 static void item_from_tag(Item *it, const Tag *t) {
     memset(it, 0, sizeof *it);
     const char *p = t->at, *e = t->at + t->al, *n, *v; int nl, vl;
@@ -1209,20 +1210,24 @@ static void mmss(char *o, size_t cap, double sec) { int s = sec < 0 ? 0 : (int)s
 
 /* ---- view (filter) */
 static int *VIEW; static int nview, viewcap, view_ident;
-static void build_view(void) {
+static struct { const Items *items; const Item *v; int n; unsigned gen; char flt[256]; int ok; } VC;   /* what VIEW was built from */
+static void build_view(void) {   /* filtered view; rebuilt only when the filter text or the item list changes */
     Level *L = &stack[nstack - 1]; Items *it = L->items;
     if (!L->flt[0]) { view_ident = 1; nview = it->n; return; }
-    view_ident = 0; nview = 0;
+    view_ident = 0;
+    if (VC.ok && VC.items == it && VC.v == it->v && VC.n == it->n && VC.gen == items_gen && !strcmp(VC.flt, L->flt)) return;
+    nview = 0;
     Buf f = {0}; lower_str(&f, L->flt);
     for (int i = 0; i < it->n; i++) {
-        Buf t = {0}; lower_str(&t, Z(it->v[i].text));
-        if (strstr(t.p ? t.p : "", f.p ? f.p : "")) {
+        Item *x = &it->v[i];
+        if (!x->lo) { Buf t = {0}; lower_str(&t, Z(x->text)); x->lo = t.p ? t.p : xstrdup(""); }
+        if (strstr(x->lo, f.p ? f.p : "")) {
             if (nview == viewcap) { viewcap = viewcap ? viewcap * 2 : 256; VIEW = xrealloc(VIEW, viewcap * sizeof(int)); }
             VIEW[nview++] = i;
         }
-        bfree(&t);
     }
     bfree(&f);
+    VC.items = it; VC.v = it->v; VC.n = it->n; VC.gen = items_gen; cpy(VC.flt, sizeof VC.flt, L->flt); VC.ok = 1;
 }
 static Item *vi(int i) { Level *L = &stack[nstack - 1]; return &L->items->v[view_ident ? i : VIEW[i]]; }
 
