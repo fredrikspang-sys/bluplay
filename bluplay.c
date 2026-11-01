@@ -845,20 +845,32 @@ static void item_from_tag(Item *it, const Tag *t) {
 static int is_dir(const Item *it) { return it->bkey && it->bkey[0] && strcmp(Z(it->type), "track") != 0; }
 static int is_albums_root(const Item *it) { return it->bkey && !strncmp(it->bkey, ALBUMS_PFX, sizeof(ALBUMS_PFX) - 1); }
 
+static void say(const char *fmt, ...);
 static char browse_sk[600];   /* searchKey of the last browse() response ("" if none), e.g. LocalMusic:Search */
+#define BROWSE_MAX_PAGES 20000   /* hard cap on nextKey pages per listing (the real player sends ~50 items per page) */
+static int browse_trunc;         /* number of listings cut short (page cap or a repeated nextKey); shown as a warning */
 static int browse_q(const char *key0, const char *q, Items *out, char *title, size_t tcap) {   /* follows nextKey; q = search text (first page only) */
     char *key = xstrdup(key0); Buf body = {0};
+    unsigned long long *seen = NULL; int nseen = 0, capseen = 0;   /* hashes of the page keys already fetched (loop guard) */
     browse_sk[0] = 0;
-    for (int i = 0; i < 50; i++) {
+    for (int i = 0;; i++) {
+        unsigned long long hv = 1469598103934665603ull; for (const char *c = key; *c; c++) hv = (hv ^ (unsigned char)*c) * 1099511628211ull;
+        int rep = 0; for (int j = 0; j < nseen; j++) if (seen[j] == hv) { rep = 1; break; }
+        if (rep || i >= BROWSE_MAX_PAGES) {
+            browse_trunc++; say("Warning: listing truncated after %d pages (%s)", i, rep ? "player repeated a page" : "page limit");
+            break;
+        }
+        if (nseen == capseen) { capseen = capseen ? capseen * 2 : 16; seen = xrealloc(seen, capseen * sizeof *seen); }
+        seen[nseen++] = hv;
         breset(&body);
         int rc = q && *q && !i ? call(&body, "/Browse", "key", key, "q", q, NULL) : call(&body, "/Browse", "key", key, NULL);
-        if (rc < 0) { free(key); bfree(&body); return -1; }
+        if (rc < 0) { free(key); free(seen); bfree(&body); return -1; }
         Tag t;
         if (!xml_root(body.p, &t) || !tag_is(&t, "browse")) {
             char *d = xml_any_text(body.p, "detail");
             if (d) fail("Browse: %s", d);
             else if (xml_root(body.p, &t)) fail("Browse: %.*s", t.nl, t.name); else fail("Browse: empty response");
-            free(d); free(key); bfree(&body); return -1;
+            free(d); free(key); free(seen); bfree(&body); return -1;
         }
         char *sn = tag_attr(&t, "serviceName"); if (sn && title) cpy(title, tcap, sn); free(sn);
         if (!i) { char *sk = tag_attr(&t, "searchKey"); cpy(browse_sk, sizeof browse_sk, Z(sk)); free(sk); }
@@ -868,7 +880,7 @@ static int browse_q(const char *key0, const char *q, Items *out, char *title, si
         free(key); key = nk;
         if (!key || !*key) break;
     }
-    free(key); bfree(&body); return 0;
+    free(key); free(seen); bfree(&body); return 0;
 }
 static int browse(const char *key0, Items *out, char *title, size_t tcap) { return browse_q(key0, NULL, out, title, tcap); }
 static int act(const char *u) {
@@ -886,6 +898,7 @@ static int cmp_item(const void *a, const void *b) {
 }
 static int all_albums(int force, Items *root) {
     if (albums_ok && !force) return 0;
+    browse_trunc = 0;
     Items own = {0}; const Items *r = root;
     if (!r || !r->n) { if (browse(ROOT, &own, NULL, 0) < 0) return -1; r = &own; }
     const char *key = NULL;
@@ -1503,7 +1516,7 @@ static int load(Level *L) {
         if (!albums_ok || force) { say("Loading albums..."); draw(); }
         if (all_albums(force, nstack ? stack[0].items : NULL) < 0) return -1;
         L->reload = 0; L->items = &ALBUMS;
-        say("%d albums", ALBUMS.n);
+        if (browse_trunc) say("%d albums (warning: the player's album listing was truncated)", ALBUMS.n); else say("%d albums", ALBUMS.n);
     } else {
         Items n = {0};
         if (browse_q(L->key, L->q, &n, NULL, 0) < 0) { items_free(&n); return -1; }

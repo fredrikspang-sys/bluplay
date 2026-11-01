@@ -12,6 +12,8 @@ env:   FAKE_QN=N    initial queue length (default 4)
        FAKE_LOG=F   log request paths to file F
 
 Test-only control endpoint: /_x?resetq=N&song=I&state=play|pause|stop&vol=V
+  /_x?bigsec=N adds N albums to section P (paged 3 at a time: many nextKey pages)
+  /_x?loopsec=1 makes section L answer with a nextKey that repeats forever
 """
 import http.server, socketserver, urllib.parse as up, sys, time, os, random, hashlib, threading
 from xml.sax.saxutils import escape, quoteattr as qa
@@ -99,6 +101,7 @@ def browse(k, q=""):
         if k.startswith("SEC:"): c, off = k[4:], 0
         else: _, c, off = k.split(":", 2); off = int(off)
         idx = [i for i, a in enumerate(ALBUMS) if sect(a["n"]) == c][off:]
+        if c == "L" and LOOP[0]: return '<browse serviceName="Library" nextKey="NEXT:L:0">%s</browse>' % "".join(aitem(i) for i in idx[:3])
         nk = (' nextKey=%s' % qa("NEXT:%s:%d" % (c, off + 3))) if len(idx) > 3 else ""
         return '<browse serviceName="Library"%s>%s</browse>' % (nk, "".join(aitem(i) for i in idx[:3]))
     if k.startswith("ALB:"):
@@ -124,6 +127,7 @@ def browse(k, q=""):
                 qa("/Add?playlist=%s&playnow=-1&service=BluOS&where=last" % n), qa("/Delete?name=%s&service=BluOS" % n)))
     return '<browse serviceName="?"></browse>'
 
+LOOP = [0]
 GRP = set()   # (ip, port) of grouped players (AddSlave/RemoveSlave)
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
@@ -151,6 +155,9 @@ class H(http.server.BaseHTTPRequestHandler):
             if "vol" in qs: S["vol"] = int(g("vol")); S["db"] = S["vol"] - 80
             if "mutelag" in qs: MLAG["lag"] = float(g("mutelag"))
             if "truemute" in qs: x = "<mute>%d</mute>" % S["mute"]
+            if "bigsec" in qs:
+                for j in range(int(g("bigsec"))): ALBUMS.append(dict(n="Pzz %04d" % (j + 1), a="Big Artist", tracks=["01 Big %d" % (j + 1)]))
+            if "loopsec" in qs: LOOP[0] = int(g("loopsec"))
             if "dellog" in qs: x = "<dellog>%s</dellog>" % "".join('<id id="%d"/>' % i for i in DELLOG)
             bump(); x = x or "<ok/>"
         elif p == "/Reindex":

@@ -224,6 +224,50 @@ try:
         else:
             os.kill(pid, signal.SIGKILL); os.waitpid(pid, 0); code = "hung"
         ok("UI: q quits cleanly (exit 0, no sanitizer report)", code == 0 and not BAD.search(raw[0]), (code, BAD.search(raw[0])))
+
+        def session(**kw):   # a fresh UI instance; returns (screen text getter, key sender, quit -> (exit code, raw output))
+            pid, fd = pty.fork()
+            if pid == 0:
+                os.execve(BIN, [BIN, "--host", HOSTARG], dict(env(**kw), TERM="xterm-256color"))
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            sc = pyte.Screen(cols, rows); st = pyte.ByteStream(sc); rw = [b""]
+            def pm(t):
+                end = time.time() + t
+                while time.time() < end:
+                    r, _, _ = select.select([fd], [], [], 0.05)
+                    if r:
+                        try: d = os.read(fd, 65536)
+                        except OSError: return
+                        if not d: return
+                        rw[0] += d; st.feed(d)
+            def tx(): return "\n".join(sc.display)
+            def wt(pred, t=8.0):
+                end = time.time() + t
+                while time.time() < end:
+                    try:
+                        if pred(): return True
+                    except Exception: pass
+                    pm(0.1)
+                return pred()
+            def ky(b, settle=0.4): os.write(fd, b); pm(settle)
+            def quit():
+                os.write(fd, b"q")
+                for _ in range(60):
+                    p, s = os.waitpid(pid, os.WNOHANG)
+                    if p: return (os.WEXITSTATUS(s) if os.WIFEXITED(s) else -1), rw[0]
+                    pm(0.1)
+                os.kill(pid, signal.SIGKILL); os.waitpid(pid, 0); return "hung", rw[0]
+            return sc, tx, wt, ky, quit
+        srv("/_x?bigsec=160&resetq=3")   # section P: 160 more albums -> ~55 nextKey pages (more than the old 50-page limit)
+        sc, tx, wt, ky, quit = session()
+        ok("UI: >50 nextKey pages are all loaded", wt(lambda: re.search(r"\b(\d+) albums", tx()) and int(re.search(r"\b(\d+) albums", tx()).group(1)) == 31 + 160, 20), tx())
+        ky(b"/"); ky(b"pzz 0160"); ky(b"\r"); ok("UI: last album of the long section is there", wt(lambda: sc.display[3].startswith("Pzz 0160")), tx())
+        code, rw = quit(); ok("UI: long listing session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
+        srv("/_x?loopsec=1")
+        sc, tx, wt, ky, quit = session()
+        ok("UI: repeated nextKey stops the listing with a warning", wt(lambda: "listing was truncated" in tx() and "Mike" in tx(), 20), tx())
+        code, rw = quit(); ok("UI: repeated-nextKey session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
+        srv("/_x?loopsec=0")
 finally:
     fake.kill(); mdns.kill(); shutil.rmtree(TMP, ignore_errors=True)
 print("\n%d/%d checks passed" % (total - fails, total))
