@@ -14,6 +14,9 @@ env:   FAKE_QN=N    initial queue length (default 4)
 Test-only control endpoint: /_x?resetq=N&song=I&state=play|pause|stop&vol=V
   /_x?bigsec=N adds N albums to section P (paged 3 at a time: many nextKey pages)
   /_x?loopsec=1 makes section L answer with a nextKey that repeats forever
+  /_x?sleep=N sets the sleep timer to N minutes; /_x?sleepend=pause|none[&delay=S] ends it (sleep field empty) and
+       either pauses the player (after S seconds, like most BluOS firmware) or keeps playing (like the NAD)
+  /_x?fixed=1 fixed volume (/Status and /Volume report -1, level changes are ignored)
 """
 import http.server, socketserver, urllib.parse as up, sys, time, os, random, hashlib, threading
 from xml.sax.saxutils import escape, quoteattr as qa
@@ -35,7 +38,7 @@ def tfile(i, k): return "%s/%s/%s.flac" % (MUSIC_ROOT, ALBUMS[i]["n"], ALBUMS[i]
 def make_queue(n): return [dict(t="Track %d" % (i + 1), a="Queue Artist", b="Queue Album", f="%s/queue/%02d.flac" % (MUSIC_ROOT, i + 1)) for i in range(n)]
 
 Q = make_queue(int(os.environ.get("FAKE_QN", "4")))
-S = {"state": "play", "vol": 40, "db": -40, "pid": 1, "song": 0, "base": 0.0, "t0": time.time(), "idx_t0": 0, "idx_dur": 0, "shuffle": 0, "repeat": 2, "mute": 0, "sleep": 0}
+S = {"state": "play", "vol": 40, "db": -40, "pid": 1, "song": 0, "base": 0.0, "t0": time.time(), "idx_t0": 0, "idx_dur": 0, "shuffle": 0, "repeat": 2, "mute": 0, "sleep": 0, "fixed": 0}
 PRESETS = [dict(id=1, name="Radio One"), dict(id=2, name="Jazz & Blues")]   # /Presets, /Preset?id=N
 SLEEPS = [15, 30, 45, 60, 90, 0]   # each /Sleep steps the timer
 DELLOG = []
@@ -56,7 +59,7 @@ def core():
     return ("<state>%s</state><pid>%d</pid><song>%d</song><title1>%s</title1><title2>%s</title2><title3>%s</title3>"
             "<volume>%d</volume><db>%d</db><totlen>200</totlen><indexing>%d</indexing><streamFormat>FLAC 16/44.1</streamFormat><shuffle>%d</shuffle><repeat>%d</repeat><mute>%d</mute>%s<sleep>%s</sleep>%s") % (
         S["state"], S["pid"], S["song"], escape(s["t"]) if s else "", escape(s["a"]) if s else "", escape(s["b"]) if s else "",
-        S["vol"], S["db"], idxn(), S["shuffle"], S["repeat"], smute(), ("<muteDb>%d</muteDb>" % S["db"]) if smute() else "",
+        -1 if S["fixed"] else S["vol"], S["db"], idxn(), S["shuffle"], S["repeat"], smute(), ("<muteDb>%d</muteDb>" % S["db"]) if smute() else "",
         S["sleep"] or "", ("<fn>%s</fn>" % escape(s["f"])) if s else "")
 def etag(c): return hashlib.md5(c.encode()).hexdigest()
 def sect(n): return n[:1].upper() if n[:1].isalpha() and n[:1].isascii() else "#"
@@ -159,6 +162,15 @@ class H(http.server.BaseHTTPRequestHandler):
             if "bigsec" in qs:
                 for j in range(int(g("bigsec"))): ALBUMS.append(dict(n="Pzz %04d" % (j + 1), a="Big Artist", tracks=["01 Big %d" % (j + 1)]))
             if "loopsec" in qs: LOOP[0] = int(g("loopsec"))
+            if "fixed" in qs: S["fixed"] = int(g("fixed"))
+            if "sleep" in qs: S["sleep"] = int(g("sleep"))
+            if "sleepend" in qs:
+                S["sleep"] = 0
+                if g("sleepend") == "pause":
+                    def fw_pause():
+                        if S["state"] == "play": setpos(secs()); S["state"] = "pause"
+                        bump()
+                    threading.Timer(float(g("delay", "0")), fw_pause).start()
             if "dellog" in qs: x = "<dellog>%s</dellog>" % "".join('<id id="%d"/>' % i for i in DELLOG)
             bump(); x = x or "<ok/>"
         elif p == "/Reindex":
@@ -201,8 +213,10 @@ class H(http.server.BaseHTTPRequestHandler):
         elif p == "/Clear": Q.clear(); S["pid"] += 1; S["song"] = -1; bump(); x = "<playlist/>"
         elif p == "/Browse": x = browse(g("key", "LocalMusic:"), g("q", ""))
         elif p == "/Volume" and "mute" not in qs:
-            if "db" in qs: S["db"] = max(-80, min(0, S["db"] + int(g("db")))); S["vol"] = S["db"] + 80
-            bump(); x = '<volume db="%d">%d</volume>' % (S["db"], S["vol"])
+            if S["fixed"]: pass
+            elif "level" in qs: S["vol"] = max(0, min(100, int(g("level")))); S["db"] = S["vol"] - 80
+            elif "db" in qs: S["db"] = max(-80, min(0, S["db"] + int(g("db")))); S["vol"] = S["db"] + 80
+            bump(); x = '<volume db="%d">%d</volume>' % (S["db"], -1 if S["fixed"] else S["vol"])
         elif p == "/Volume" and "mute" in qs:   # real player: level kept, reply db="-100" mute="1" muteDb=..
             MLAG["old"] = smute(); MLAG["t"] = time.time(); S["mute"] = int(g("mute")); bump()
             x = ('<volume db="-100" mute="1" muteVolume="%d" muteDb="%d">0</volume>' % (S["vol"], S["db"])) if S["mute"] else ('<volume db="%d" mute="0">%d</volume>' % (S["db"], S["vol"]))
@@ -223,7 +237,10 @@ class H(http.server.BaseHTTPRequestHandler):
         elif p in ("/Shuffle", "/Repeat"):
             k = p[1:].lower(); S[k] = int(g("state", "0")); bump(); x = '<playlist shuffle="%d" repeat="%d"/>' % (S["shuffle"], S["repeat"])
         elif p == "/Pause":
-            setpos(secs()); S["state"] = "pause" if S["state"] == "play" else "play"; bump(); x = "<state>%s</state>" % S["state"]
+            setpos(secs())
+            if g("toggle") == "1": S["state"] = "pause" if S["state"] == "play" else "play"
+            elif S["state"] == "play": S["state"] = "pause"   # plain /Pause only pauses
+            bump(); x = "<state>%s</state>" % S["state"]
         elif p == "/Skip":
             if Q: S["song"] = (S["song"] + 1) % len(Q)
             setpos(0); bump(); x = "<id>%d</id>" % S["song"]

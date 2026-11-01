@@ -306,6 +306,50 @@ try:
         code, rw = quit(); ok("UI: repeated-nextKey session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
         ok("UI: a truncated album list is not cached", not os.path.exists(cache), cache)
         srv("/_x?loopsec=0")
+
+        # ---- sleep at zero (the mock's timer ends; firmware pauses itself or not)
+        def vstat():
+            x = srv("/Status"); return int(re.search(r"<volume>(-?\d+)</volume>", x).group(1)), re.search(r"<state>(.*?)</state>", x).group(1)
+        def acts(n0):   # volume/pause requests bluplay sent since log line n0
+            return [l for l in rlog().splitlines()[n0:] if l.startswith(("/Volume", "/Pause", "/Play", "/Stop"))]
+        def sleep_session(end, fixed=0, **kw):
+            srv("/_x?resetq=3&song=0&state=play&vol=40&sleep=1&fixed=%d" % fixed)
+            sc, tx, wt, ky, quit = session(**kw)
+            up = wt(lambda: "sleep 1m" in sc.display[1], 10)
+            n0 = len(rlog().splitlines()); srv("/_x?sleepend=" + end)
+            return sc, tx, wt, ky, quit, n0, up
+        levels = lambda a: [int(l.split("level=")[1]) for l in a if l.startswith("/Volume?level=")]
+        sc, tx, wt, ky, quit, n0, up = sleep_session("pause&delay=1", BLUPLAY_SLEEP_FADE="3")
+        time.sleep(6); pm = acts(n0)
+        ok("sleep: firmware pauses itself -> bluplay sends nothing, volume untouched", up and pm == [] and vstat() == (40, "pause"), (up, pm, vstat()))
+        code, rw = quit()
+        sc, tx, wt, ky, quit, n0, up = sleep_session("none", BLUPLAY_SLEEP_FADE="3")
+        done = wt(lambda: "Sleep: paused, volume restored" in tx(), 15); a = acts(n0); lv = levels(a)
+        ok("sleep: no firmware pause -> fade, /Pause, restore", up and done and vstat() == (40, "pause") and len(lv) >= 5 and "/Pause" in a
+           and a.index("/Pause") == len(a) - 2 and a[-1] == "/Volume?level=40" and all(l.startswith("/Volume?level=") for l in a[:-2]), (up, done, a, vstat()))
+        ok("sleep: fade steps strictly decrease, never above the original, only the final restore raises",
+           all(x < y for x, y in zip(lv[:-1], [40] + lv[:-2])) and max(lv[:-1]) < 40 and lv[-1] == 40 and "toggle" not in "".join(a), lv)
+        code, rw = quit(); ok("sleep: fade session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
+        sc, tx, wt, ky, quit, n0, up = sleep_session("none", BLUPLAY_SLEEP_FADE="30")
+        fading = wt(lambda: len(levels(acts(n0))) >= 2, 10); ky(b"z", 1.0); a = acts(n0)
+        ok("sleep: z during the fade restores the volume at once, no pause", up and fading and vstat() == (40, "play") and a[-1] == "/Volume?level=40" and "/Pause" not in a, (up, fading, a, vstat()))
+        code, rw = quit()
+        sc, tx, wt, ky, quit, n0, up = sleep_session("none", BLUPLAY_SLEEP_FADE="30")
+        fading = wt(lambda: len(levels(acts(n0))) >= 2, 10); code, rw = quit(); a = acts(n0)
+        ok("sleep: quit during the fade restores the volume", up and fading and code == 0 and vstat() == (40, "play") and a[-1] == "/Volume?level=40" and "/Pause" not in a, (up, fading, code, a, vstat()))
+        sc, tx, wt, ky, quit, n0, up = sleep_session("none", fixed=1, BLUPLAY_SLEEP_FADE="3")
+        done = wt(lambda: vstat()[1] == "pause", 12); time.sleep(0.5); a = acts(n0)
+        ok("sleep: fixed volume -> pause only, no volume calls", up and done and a == ["/Pause"], (up, done, a))
+        code, rw = quit(); srv("/_x?fixed=0")
+        sc, tx, wt, ky, quit, n0, up = sleep_session("none", BLUPLAY_SLEEP_FADE="off")
+        done = wt(lambda: vstat()[1] == "pause", 12); time.sleep(0.5); a = acts(n0)
+        ok("sleep: sleep_fade off -> pause only", up and done and a == ["/Pause"] and vstat()[0] == 40, (up, done, a))
+        code, rw = quit(); ok("sleep: fade-off session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
+        rc, out, err = run(["--no-sleep-fade", "--sleep-fade", "20", "--status", "--host", HOSTARG]); ok("--no-sleep-fade / --sleep-fade SECS accepted", rc == 0, (rc, err))
+        rc, out, err = run(["--sleep-fade", "1", "--status", "--host", HOSTARG]); rc2, out2, err2 = run(["--sleep-fade", "soon", "--status", "--host", HOSTARG])
+        ok("--sleep-fade bad value -> exit 2", rc == 0 and rc2 == 2 and "invalid sleep_fade" in err2, (rc, rc2, err2))
+        ok("sleep: volume never set above the original in any session", all(v <= 40 for v in levels(rlog().splitlines())), "")
+        srv("/_x?sleep=0")
 finally:
     fake.kill(); mdns.kill(); shutil.rmtree(TMP, ignore_errors=True)
 print("\n%d/%d checks passed" % (total - fails, total))

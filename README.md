@@ -124,6 +124,7 @@ db_offset = 0                # added to the volume shown in dB (e.g. to match an
 random = off                 # track | album | off: start with random mode on
 shuffle = off                # on | off: set the player's shuffle at start (leave out = unchanged)
 repeat = off                 # off | queue | track: set the player's repeat at start (leave out = unchanged)
+sleep_fade = on              # on | off | SECONDS: fade out + pause when the sleep timer ends and the player keeps playing
 discovery = on               # set to off to never search the network
 discovery_timeout = 2        # seconds to wait for mDNS answers
 ```
@@ -139,9 +140,18 @@ discovery_timeout = 2        # seconds to wait for mDNS answers
 | `random` | `--random [album]` | `BLUPLAY_RANDOM` | off |
 | `shuffle` | `--shuffle [on\|off]` | `BLUPLAY_SHUFFLE` | unchanged |
 | `repeat` | `--repeat off\|queue\|track` | `BLUPLAY_REPEAT` | unchanged |
+| `sleep_fade` | `--sleep-fade on\|off\|SECS`, `--no-sleep-fade` | `BLUPLAY_SLEEP_FADE` | on (24 s) |
 | `discovery` | `--no-discover` | `BLUPLAY_DISCOVERY` | on |
 | `discovery_timeout` | | | `2` |
 | config file | `-c`, `--config FILE` | `BLUPLAY_CONFIG` | `~/.config/bluplay/config` |
+
+**Sleep at zero.** Some BluOS firmware (seen on a NAD with BluOS 4.18) counts the sleep timer down to zero and
+then keeps playing. While bluplay is open it watches the countdown: if the player has not paused by itself about
+3 s after the timer ends, bluplay lowers the volume in 16 steps over 24 s (`sleep_fade = SECONDS` changes the
+length, 2-300) down to 0, sends a plain pause, waits until the player has stopped (at most 10 s) and then sets the
+volume back to where it was. Players that fade and pause themselves are left alone. With a fixed volume, mute on,
+or `sleep_fade = off` it only pauses. Space, `S`, `z`, `+`/`-`, `m` or quitting during the fade stop it and restore
+the volume at once; a lost connection stops it too (bluplay tries once to set the volume back).
 
 **Library root and player root.** The player reads your music from a network share and reports each track as
 a path in its own namespace. To find `player_root`, play a track from your library and run `bluplay --status`:
@@ -209,7 +219,7 @@ Global (both panes):
 | `r` | repeat: off -> queue -> track -> off |
 | `m` | mute on/off (the volume level is kept; `MUTED` in the top line) |
 | `S` | stop (`Space` starts again) |
-| `z` | sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off (`sleep Nm` in the top line) |
+| `z` | sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off (`sleep Nm` in the top line); see *Sleep at zero* below |
 | `P` | presets: list the player's presets, `1`-`9` plays one |
 | `w` | save the queue as a playlist on the player (asks for a name) |
 | `L` | saved playlists: `Enter` loads one (replaces the queue, asks y/n), `d` deletes one (asks y/n), `Esc` closes |
