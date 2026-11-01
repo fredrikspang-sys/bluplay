@@ -1374,6 +1374,7 @@ static const char *HELP_LINES[] = {
     "z             sleep timer: off -> 15 -> 30 -> 45 -> 60 -> 90 min -> off ('sleep Nm' in the top line)",
     "              At zero, if the player keeps playing (some firmware does not stop), bluplay fades out, pauses and",
     "              restores the volume (config sleep_fade = on|off|SECONDS). Space, S, z, +/-, m or q stop the fade.",
+    "              config sleep_end = stop sends stop instead of pause at the end.",
     "P             presets: lists the player's presets, 1-9 plays one",
     "w             save the queue as a playlist on the player (asks for a name; same name = overwrite)",
     "L             saved playlists: Enter loads one (replaces the queue, y/n), d deletes one (y/n), Esc closes",
@@ -2058,14 +2059,16 @@ static void c_call(const char *path, const char *k, const char *v) {
 /* ---------------------------------------------------------------- sleep at zero
  * Some BluOS firmware (seen on a NAD, BluOS 4.18) counts the /Sleep timer down to zero and then does nothing.
  * When the countdown ends while bluplay runs and the player is still playing SF_GRACE s later, bluplay fades the
- * volume out itself (SF_STEPS steps over sleep_fade_secs, down to 0), sends a plain /Pause, waits for the player
+ * volume out itself (SF_STEPS steps over sleep_fade_secs, down to 0), sends a plain /Pause (or /Stop with
+ * sleep_end = stop), waits for the player
  * to stop and then sets the original volume again. Players that pause themselves are left alone. Any key that
  * touches playback/volume, a dropped connection or quitting stops the fade and restores the volume at once.
  * Runs from the main loop (sf_tick), never blocks it. */
 static int sleep_fade = 1; static double sleep_fade_secs = 24;   /* config sleep_fade = on | off | SECONDS */
+static int sleep_stop = 0;   /* config sleep_end = pause | stop: what ends playback at zero (0 = /Pause, 1 = /Stop) */
 #define SF_GRACE 3.0       /* the firmware's own pause must show within this long after the timer ends */
 #define SF_STEPS 16        /* volume steps of the fade (24 s default: one every 1.5 s) */
-#define SF_PAUSE_WAIT 10.0 /* after /Pause: restore the volume once stopped, at the latest after this long */
+#define SF_PAUSE_WAIT 10.0 /* after /Pause or /Stop: restore the volume once stopped, at the latest after this long */
 static struct { int phase, prev, orig, last, step; double next, deadline; } SF = { .orig = -1, .last = -1 };   /* phase: 0 idle, 1 grace, 2 fading, 3 paused, waiting for the stop */
 static int st_playing(const Status *st) { return st->ok && (!strcmp(st->state, "play") || !strcmp(st->state, "stream")); }
 static int sf_level(int lvl) { char v[16]; snprintf(v, sizeof v, "%d", lvl); Buf b = {0}; int r = call(&b, "/Volume", "level", v, NULL); bfree(&b); return r; }
@@ -2077,15 +2080,15 @@ static void sf_stop(const char *m) {   /* end the fade; volume back to the origi
 }
 static void sf_abort(void) { if (SF.phase) sf_stop(sf_lowered() ? "Sleep: fade cancelled, volume restored" : "Sleep: fade cancelled"); }
 static void sf_pause(void) {
-    Buf b = {0}; int r = call(&b, "/Pause", NULL); bfree(&b);
-    if (r < 0) { char e[sizeof ERR]; cpy(e, sizeof e, ERR); sf_stop(NULL); say("Sleep: pause failed: %s", e); return; }
+    Buf b = {0}; int r = call(&b, sleep_stop ? "/Stop" : "/Pause", NULL); bfree(&b);
+    if (r < 0) { char e[sizeof ERR]; cpy(e, sizeof e, ERR); sf_stop(NULL); say("Sleep: %s failed: %s", sleep_stop ? "stop" : "pause", e); return; }
     SF.phase = 3; SF.deadline = mono() + SF_PAUSE_WAIT;
 }
 static void sf_begin(void) {   /* timer ended and the player still plays: fade (if allowed and the volume is known) or just pause */
     Status st;
     if (status_get(&st) < 0 || !st_playing(&st)) { SF.phase = 0; return; }
     SF.last = -1; SF.orig = sleep_fade && !st.mute ? st.vol : -1;   /* <volume> of a fresh /Status; -1 = fixed volume */
-    if (SF.orig <= 0) { SF.orig = -1; say("Sleep: timer ended, pausing"); sf_pause(); return; }   /* fade off, fixed (-1), muted or unknown volume */
+    if (SF.orig <= 0) { SF.orig = -1; say(sleep_stop ? "Sleep: timer ended, stopping" : "Sleep: timer ended, pausing"); sf_pause(); return; }   /* fade off, fixed (-1), muted or unknown volume */
     SF.last = SF.orig; SF.step = 0; SF.phase = 2; SF.next = mono();
     say("Sleep: fading out\xe2\x80\xa6");
 }
@@ -2111,11 +2114,12 @@ static void sf_tick(void) {
         }
         if (SF.step >= SF_STEPS) sf_pause(); else SF.next = now + sleep_fade_secs / SF_STEPS;
     } else if (SF.phase == 3) {
-        int low = sf_lowered();
-        if (!st_playing(&S)) sf_stop(low ? "Sleep: paused, volume restored" : "Sleep: paused");
+        int low = sf_lowered(); const char *done = sleep_stop ? (low ? "Sleep: stopped, volume restored" : "Sleep: stopped") : (low ? "Sleep: paused, volume restored" : "Sleep: paused");
+        if (!st_playing(&S)) sf_stop(done);
         else if (now >= SF.deadline) {
             Status st;
-            if (status_get(&st) == 0 && !st_playing(&st)) sf_stop(low ? "Sleep: paused, volume restored" : "Sleep: paused");
+            if (status_get(&st) == 0 && !st_playing(&st)) sf_stop(done);
+            else if (sleep_stop) sf_stop(low ? "Sleep: the stop did not take effect; volume restored" : "Sleep: the stop did not take effect");
             else sf_stop(low ? "Sleep: the pause did not take effect; volume restored" : "Sleep: the pause did not take effect");
         }
     }
@@ -2827,7 +2831,7 @@ static int resolve_host(const char *hp, int defport) {   /* "host", "host:port" 
 /* ---------------------------------------------------------------- configuration
  * Precedence (highest first): command-line flags > BLUPLAY_* environment > config file > discovery.
  * Config file: key = value lines, '#' comments. Keys: host, port, library_root, player_root, shares,
- * db_offset, random, shuffle, repeat, sleep_fade, discovery, discovery_timeout. */
+ * db_offset, random, shuffle, repeat, sleep_fade, sleep_end, discovery, discovery_timeout. */
 static struct {
     char host[256], lib[512], prem[512], shares[2048], cfgpath[1024];
     int port, discovery; double disc_tmo;
@@ -2870,6 +2874,11 @@ static int cfg_set(const char *k, const char *v, const char *src) {   /* 0 ok, -
         else if (!strcmp(v, "on") || !strcmp(v, "1") || !strcasecmp(v, "yes") || !strcasecmp(v, "true")) sleep_fade = 1;
         else if (!strcmp(v, "off") || !strcmp(v, "0") || !strcasecmp(v, "no") || !strcasecmp(v, "false")) sleep_fade = 0;
         else { fprintf(stderr, "bluplay: %s: invalid sleep_fade '%s' (on, off or SECONDS 2-300)\n", src, v); return -1; }
+    }
+    else if (!strcmp(k, "sleep_end")) {   /* pause | stop */
+        if (!strcasecmp(v, "pause")) sleep_stop = 0;
+        else if (!strcasecmp(v, "stop")) sleep_stop = 1;
+        else { fprintf(stderr, "bluplay: %s: invalid sleep_end '%s' (pause or stop)\n", src, v); return -1; }
     }
     else if (!strcmp(k, "discovery")) CFG.discovery = parse_bool(v);
     else if (!strcmp(k, "discovery_timeout")) {
@@ -2914,6 +2923,7 @@ static void cfg_env(void) {
         { "BLUPLAY_HOST", "host" }, { "BLUPLAY_PORT", "port" }, { "BLUPLAY_LIBRARY_ROOT", "library_root" }, { "BLUPLAY_PLAYER_ROOT", "player_root" },
         { "BLUPLAY_SHARES", "shares" }, { "BLUPLAY_DB_OFFSET", "db_offset" }, { "BLUPLAY_RANDOM", "random" },
         { "BLUPLAY_SHUFFLE", "shuffle" }, { "BLUPLAY_REPEAT", "repeat" }, { "BLUPLAY_SLEEP_FADE", "sleep_fade" },
+        { "BLUPLAY_SLEEP_END", "sleep_end" },
         { "BLUPLAY_DISCOVERY", "discovery" } };
     for (size_t i = 0; i < sizeof E / sizeof *E; i++) { const char *v = getenv(E[i].env); if (v && *v) cfg_set(E[i].key, v, E[i].env); }
 }
@@ -3359,6 +3369,7 @@ static void usage(FILE *o) {
           "      --sleep-fade on|off|SECS  when the sleep timer ends and the player keeps playing: fade out over\n"
           "                             SECS (default on = 24 s), pause, restore the volume (off = just pause)\n"
           "      --no-sleep-fade        same as --sleep-fade off\n"
+          "      --sleep-end pause|stop  what ends playback at sleep zero: pause (default) or stop\n"
           "      --no-discover          never search the network for players\n"
           "      --discover             list players found on the network and exit\n"
           "      --status               print the player status and exit\n"
@@ -3372,7 +3383,7 @@ static void usage(FILE *o) {
           "  -h, --help                 this help\n\n"
           "environment: BLUPLAY_HOST, BLUPLAY_PORT, BLUPLAY_LIBRARY_ROOT, BLUPLAY_PLAYER_ROOT, BLUPLAY_SHARES,\n"
           "             BLUPLAY_DB_OFFSET, BLUPLAY_RANDOM, BLUPLAY_SHUFFLE, BLUPLAY_REPEAT, BLUPLAY_SLEEP_FADE,\n"
-          "             BLUPLAY_DISCOVERY, BLUPLAY_CONFIG\n"
+          "             BLUPLAY_SLEEP_END, BLUPLAY_DISCOVERY, BLUPLAY_CONFIG\n"
           "Command-line flags override the environment, which overrides the config file.\n"
           "Press ? inside the player for key bindings (e.g. m mute, S stop, z sleep timer, P presets, J/K move in queue).\n", o);
 }
@@ -3505,6 +3516,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(opt, "--repeat")) { NEEDVAL(); if (cfg_set("repeat", val, opt) < 0) return 2; }
         else if (!strcmp(opt, "--sleep-fade")) { NEEDVAL(); if (cfg_set("sleep_fade", val, opt) < 0) return 2; }
         else if (!strcmp(opt, "--no-sleep-fade")) cfg_set("sleep_fade", "off", opt);
+        else if (!strcmp(opt, "--sleep-end")) { NEEDVAL(); if (cfg_set("sleep_end", val, opt) < 0) return 2; }
         else if (!strcmp(opt, "--no-discover")) CFG.discovery = 0;
         else if (!strcmp(opt, "--discover")) mode = M_DISCOVER;
         else if (!strcmp(opt, "--status")) mode = M_STATUS;

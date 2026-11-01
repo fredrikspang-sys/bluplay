@@ -125,6 +125,7 @@ random = off                 # track | album | off: start with random mode on
 shuffle = off                # on | off: set the player's shuffle at start (leave out = unchanged)
 repeat = off                 # off | queue | track: set the player's repeat at start (leave out = unchanged)
 sleep_fade = on              # on | off | SECONDS: fade out + pause when the sleep timer ends and the player keeps playing
+sleep_end = pause            # pause | stop: how playback is ended at sleep zero (stop = /Stop instead of /Pause)
 discovery = on               # set to off to never search the network
 discovery_timeout = 2        # seconds to wait for mDNS answers
 ```
@@ -141,6 +142,7 @@ discovery_timeout = 2        # seconds to wait for mDNS answers
 | `shuffle` | `--shuffle [on\|off]` | `BLUPLAY_SHUFFLE` | unchanged |
 | `repeat` | `--repeat off\|queue\|track` | `BLUPLAY_REPEAT` | unchanged |
 | `sleep_fade` | `--sleep-fade on\|off\|SECS`, `--no-sleep-fade` | `BLUPLAY_SLEEP_FADE` | on (24 s) |
+| `sleep_end` | `--sleep-end pause\|stop` | `BLUPLAY_SLEEP_END` | `pause` |
 | `discovery` | `--no-discover` | `BLUPLAY_DISCOVERY` | on |
 | `discovery_timeout` | | | `2` |
 | config file | `-c`, `--config FILE` | `BLUPLAY_CONFIG` | `~/.config/bluplay/config` |
@@ -151,7 +153,9 @@ then keeps playing. While bluplay is open it watches the countdown: if the playe
 length, 2-300) down to 0, sends a plain pause, waits until the player has stopped (at most 10 s) and then sets the
 volume back to where it was. Players that fade and pause themselves are left alone. With a fixed volume, mute on,
 or `sleep_fade = off` it only pauses. Space, `S`, `z`, `+`/`-`, `m` or quitting during the fade stop it and restore
-the volume at once; a lost connection stops it too (bluplay tries once to set the volume back).
+the volume at once; a lost connection stops it too (bluplay tries once to set the volume back). With
+`sleep_end = stop` bluplay sends stop instead of pause (in all of these cases) and restores the volume the same
+way once playback has stopped.
 
 **Library root and player root.** The player reads your music from a network share and reports each track as
 a path in its own namespace. To find `player_root`, play a track from your library and run `bluplay --status`:
