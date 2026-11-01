@@ -91,7 +91,8 @@ def browse(k, q=""):
                 '<item browseKey="LocalMusic:bySection:Album/x" text="Albums" type="link"/></browse>')
     if k.startswith("LocalMusic:bySection:Album"):
         return '<browse serviceName="Library" type="sections">%s</browse>' % "".join(
-            '<item browseKey=%s text=%s type="section"/>' % (qa("SEC:" + c), qa(c)) for c in sorted(set(sect(a["n"]) for a in ALBUMS)))
+            '<item browseKey=%s text=%s text2="%d" type="section"/>' % (qa("SEC:" + c), qa(c), sum(sect(a["n"]) == c for a in ALBUMS))
+            for c in sorted(set(sect(a["n"]) for a in ALBUMS)))   # text2 = album count per section, as on the real player
     if k.startswith("LocalMusic:bySection:Artist"):
         return '<browse serviceName="Library">%s</browse>' % "".join(
             '<item browseKey=%s text=%s type="artist"/>' % (qa("ART:%d" % i), qa(a["a"])) for i, a in enumerate(ALBUMS))

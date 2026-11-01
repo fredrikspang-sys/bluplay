@@ -896,6 +896,91 @@ static int cmp_item(const void *a, const void *b) {
     const Item *x = a, *y = b; int c = strcmp(x->sk, y->sk);
     return c ? c : (x->ord - y->ord);
 }
+/* ---- album list disk cache: $XDG_CACHE_HOME/bluplay (or ~/.cache/bluplay)/albums-HOST_PORT.
+ * Keyed on a fingerprint of the Albums section menu (section keys + per-section album counts as sent by the
+ * player), so a library change that alters any section's count (or a reindex that does) reloads it; 'u' always
+ * reloads. Format: "bluplay-albums 1" / fingerprint / count / one "LEN RAW" line per album (raw <item> attributes).
+ * Any mismatch, parse error or a raw string that does not round-trip falls back to a full load. */
+#define ALB_CACHE_MAGIC "bluplay-albums 1"
+static void alb_cache_path(char *out, size_t cap, int dir_only) {
+    const char *x = getenv("XDG_CACHE_HOME"), *home = getenv("HOME"); char d[700];
+    if (x && *x) snprintf(d, sizeof d, "%.600s/bluplay", x);
+    else if (home && *home) snprintf(d, sizeof d, "%.600s/.cache/bluplay", home);
+    else { out[0] = 0; return; }
+    if (dir_only) { cpy(out, cap, d); return; }
+    char h[sizeof HOST]; cpy(h, sizeof h, HOST);
+    for (char *c = h; *c; c++) if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '.' || *c == '-')) *c = '_';
+    snprintf(out, cap, "%s/albums-%s", d, h);
+}
+static void alb_fingerprint(char out[17], const char *key, const Items *top) {
+    unsigned long long hv = 1469598103934665603ull;
+#define FP(str) for (const char *c_ = (str); *c_; c_++) hv = (hv ^ (unsigned char)*c_) * 1099511628211ull; hv = (hv ^ 0xA) * 1099511628211ull;
+    FP(key); for (int i = 0; i < top->n; i++) { FP(Z(top->v[i].raw)); }
+#undef FP
+    snprintf(out, 17, "%016llx", hv);
+}
+static int alb_cache_read(const char *fp, Items *out) {   /* 0 = loaded into out, -1 = no usable cache */
+    char path[1200]; alb_cache_path(path, sizeof path, 0); if (!path[0]) return -1;
+    unsigned long long sz = 0; FILE *f = fopen_reg(path, &sz); if (!f) return -1;
+    if (sz > MAX_RESP) { fclose(f); return -1; }
+    char *d = xrealloc(NULL, sz + 1); size_t n = fread(d, 1, sz, f); fclose(f); d[n] = 0;
+    if (n != sz) { free(d); return -1; }
+    char *p = d, *e = d + n; int cnt = -1, r = -1;
+    size_t ml = strlen(ALB_CACHE_MAGIC);
+    if (n < ml + 1 || memcmp(p, ALB_CACHE_MAGIC "\n", ml + 1)) goto out;
+    p += ml + 1;
+    if ((size_t)(e - p) < 17 || memcmp(p, fp, 16) || p[16] != '\n') goto out;
+    p += 17;
+    { char *q; long c = strtol(p, &q, 10); if (q == p || *q != '\n' || c < 0 || c > 10000000) goto out; cnt = (int)c; p = q + 1; }
+    for (int i = 0; i < cnt; i++) {
+        char *q; unsigned long len = strtoul(p, &q, 10);
+        if (q == p || *q != ' ' || len > (unsigned long)(e - q - 1) || q[1 + len] != '\n') goto bad;
+        char *raw = q + 1; raw[len] = 0;
+        Buf x = {0}; bputs(&x, "<item"); bputs(&x, raw); bputs(&x, "></item>");
+        Tag t; Item it;
+        if (!xml_next(x.p, &t) || !tag_is(&t, "item")) { bfree(&x); goto bad; }
+        item_from_tag(&it, &t); bfree(&x);
+        if (strcmp(it.raw, raw)) { item_free(&it); goto bad; }
+        items_push(out, &it); p = raw + len + 1;
+    }
+    if (p != e) goto bad;
+    r = 0; goto out;
+bad:
+    items_free(out);
+out:
+    free(d); return r;
+}
+static void alb_cache_write(const char *fp, const Items *a) {   /* best effort: write to a temp file, then rename */
+    char dir[800], path[1200], tmp[1300]; alb_cache_path(dir, sizeof dir, 1); alb_cache_path(path, sizeof path, 0);
+    if (!dir[0] || !path[0]) return;
+    { char up[800]; cpy(up, sizeof up, dir); char *sl = strrchr(up, '/'); if (sl && sl != up) { *sl = 0; mkdir(up, 0700); } mkdir(dir, 0700); }
+    snprintf(tmp, sizeof tmp, "%s.%d.tmp", path, (int)getpid());
+    FILE *f = fopen(tmp, "wb"); if (!f) return;
+    fprintf(f, "%s\n%s\n%d\n", ALB_CACHE_MAGIC, fp, a->n);
+    for (int i = 0; i < a->n; i++) { const char *r = Z(a->v[i].raw); fprintf(f, "%zu %s\n", strlen(r), r); }
+    if (fclose(f) != 0 || rename(tmp, path) != 0) unlink(tmp);
+}
+static void albums_finish(Items *out) {   /* drop exact duplicates, build sort keys, sort; result becomes ALBUMS */
+    int hn = 1; while (hn < out->n * 2 + 2) hn <<= 1;
+    int *h = xrealloc(NULL, hn * sizeof(int)); for (int i = 0; i < hn; i++) h[i] = -1;
+    Items res = {0};
+    for (int i = 0; i < out->n; i++) {
+        Item *it = &out->v[i]; if (!it->raw) it->raw = xstrdup("");
+        unsigned hv = 2166136261u; for (const char *c = it->raw; *c; c++) hv = (hv ^ (unsigned char)*c) * 16777619u;
+        int dup = 0, k = hv & (hn - 1);
+        while (h[k] >= 0) { if (!strcmp(res.v[h[k]].raw, it->raw)) { dup = 1; break; } k = (k + 1) & (hn - 1); }
+        if (dup) { item_free(it); continue; }
+        Buf sk = {0}, c1 = {0}, c2 = {0};
+        sk_key(&sk, Z(it->text)); cf_key(&c1, Z(it->text)); cf_key(&c2, Z(it->text2));
+        bputc(&sk, 1); bputs(&sk, c1.p ? c1.p : ""); bputc(&sk, 1); bputs(&sk, c2.p ? c2.p : "");
+        free(it->sk); it->sk = sk.p ? sk.p : xstrdup(""); bfree(&c1); bfree(&c2);
+        it->ord = res.n; h[k] = res.n; items_push(&res, it);
+    }
+    free(h); free(out->v); out->v = NULL; out->n = out->cap = 0;
+    qsort(res.v, res.n, sizeof(Item), cmp_item);
+    items_free(&ALBUMS); ALBUMS = res; albums_ok = 1;
+}
+static void draw(void);
 static int all_albums(int force, Items *root) {
     if (albums_ok && !force) return 0;
     browse_trunc = 0;
@@ -906,33 +991,20 @@ static int all_albums(int force, Items *root) {
     if (!key) { items_free(&own); return fail("no Albums section found in the library"); }
     Items top = {0}, out = {0};
     if (browse(key, &top, NULL, 0) < 0) { items_free(&own); items_free(&top); return -1; }
+    char fp[17]; alb_fingerprint(fp, key, &top);
     items_free(&own);
+    if (!force && !browse_trunc && alb_cache_read(fp, &out) == 0) { items_free(&top); albums_finish(&out); return 0; }
+    double last = 0;
     for (int i = 0; i < top.n; i++) {
         Item *s = &top.v[i];
         if (!strcmp(Z(s->type), "section") && s->bkey && *s->bkey) {
+            if (mono() - last >= 0.1) { say("Loading albums... %d", out.n); draw(); last = mono(); }   /* progress between pages */
             if (browse(s->bkey, &out, NULL, 0) < 0) { items_free(&top); items_free(&out); return -1; }
         } else { items_push(&out, s); memset(s, 0, sizeof *s); }
     }
     items_free(&top);
-    /* drop exact duplicates (hash of raw attributes) */
-    int hn = 1; while (hn < out.n * 2 + 2) hn <<= 1;
-    int *h = xrealloc(NULL, hn * sizeof(int)); for (int i = 0; i < hn; i++) h[i] = -1;
-    Items res = {0};
-    for (int i = 0; i < out.n; i++) {
-        Item *it = &out.v[i]; if (!it->raw) it->raw = xstrdup("");
-        unsigned hv = 2166136261u; for (const char *c = it->raw; *c; c++) hv = (hv ^ (unsigned char)*c) * 16777619u;
-        int dup = 0, k = hv & (hn - 1);
-        while (h[k] >= 0) { if (!strcmp(res.v[h[k]].raw, it->raw)) { dup = 1; break; } k = (k + 1) & (hn - 1); }
-        if (dup) { item_free(it); continue; }
-        Buf sk = {0}, c1 = {0}, c2 = {0};
-        sk_key(&sk, Z(it->text)); cf_key(&c1, Z(it->text)); cf_key(&c2, Z(it->text2));
-        bputc(&sk, 1); bputs(&sk, c1.p ? c1.p : ""); bputc(&sk, 1); bputs(&sk, c2.p ? c2.p : "");
-        it->sk = sk.p ? sk.p : xstrdup(""); bfree(&c1); bfree(&c2);
-        it->ord = res.n; h[k] = res.n; items_push(&res, it);
-    }
-    free(h); free(out.v);
-    qsort(res.v, res.n, sizeof(Item), cmp_item);
-    items_free(&ALBUMS); ALBUMS = res; albums_ok = 1;
+    albums_finish(&out);
+    if (!browse_trunc) alb_cache_write(fp, &ALBUMS);   /* never cache a truncated list */
     return 0;
 }
 

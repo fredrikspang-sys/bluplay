@@ -43,7 +43,7 @@ for _ in range(100):
     except Exception: time.sleep(0.05)
 
 def env(**kw):
-    e = {k: v for k, v in os.environ.items() if not k.startswith("BLUPLAY_") and k != "XDG_CONFIG_HOME"}
+    e = {k: v for k, v in os.environ.items() if not k.startswith("BLUPLAY_") and k not in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME")}
     e.update(HOME=TMP, LANG="C.UTF-8", LC_ALL="C.UTF-8", ASAN_OPTIONS="detect_leaks=0", BLUPLAY_MDNS_ADDR="127.0.0.1:%d" % DEAD)
     e.update(kw); return e
 def run(args, timeout=20, **kw):
@@ -257,16 +257,31 @@ try:
                     if p: return (os.WEXITSTATUS(s) if os.WIFEXITED(s) else -1), rw[0]
                     pm(0.1)
                 os.kill(pid, signal.SIGKILL); os.waitpid(pid, 0); return "hung", rw[0]
+            global sc_raw
+            sc_raw = lambda: rw[0]
             return sc, tx, wt, ky, quit
+        cache = os.path.join(TMP, ".cache", "bluplay", "albums-127.0.0.1_%d" % PORT)
+        ok("UI: album list cached on disk", os.path.exists(cache) and open(cache).read().startswith("bluplay-albums 1\n"), cache)
+        s0 = nsec(); srv("/_x?resetq=3")
+        sc, tx, wt, ky, quit = session()
+        ok("UI: next start uses the disk cache (no section fetches)", wt(lambda: "31 albums" in tx(), 10) and nsec() == s0, (s0, nsec(), tx()))
+        ky(b"g"); ky(b"t"); ok("UI: g+letter works on the cached list", wt(lambda: any(l.startswith("Tango") for l in sc.display[3:])), tx())
+        code, rw = quit(); ok("UI: cached session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
+        with open(cache, "r+") as f: d = f.read(); f.seek(0); f.write(d.replace("Alpha", "Alpxa", 1)[:len(d) - 7]); f.truncate()
+        sc, tx, wt, ky, quit = session()
+        ok("UI: corrupt cache falls back to a full load", wt(lambda: "31 albums" in tx(), 10) and nsec() > s0 and "Alpha" in tx() and "Alpxa" not in tx(), (s0, nsec(), tx()))
+        code, rw = quit()
         srv("/_x?bigsec=160&resetq=3")   # section P: 160 more albums -> ~55 nextKey pages (more than the old 50-page limit)
         sc, tx, wt, ky, quit = session()
         ok("UI: >50 nextKey pages are all loaded", wt(lambda: re.search(r"\b(\d+) albums", tx()) and int(re.search(r"\b(\d+) albums", tx()).group(1)) == 31 + 160, 20), tx())
+        ok("UI: changed library (section counts) reloads, with progress", re.search(rb"Loading albums\.\.\. \d+", sc_raw()) is not None, "")
         ky(b"/"); ky(b"pzz 0160"); ky(b"\r"); ok("UI: last album of the long section is there", wt(lambda: sc.display[3].startswith("Pzz 0160")), tx())
         code, rw = quit(); ok("UI: long listing session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
-        srv("/_x?loopsec=1")
+        srv("/_x?loopsec=1"); os.remove(cache)
         sc, tx, wt, ky, quit = session()
         ok("UI: repeated nextKey stops the listing with a warning", wt(lambda: "listing was truncated" in tx() and "Mike" in tx(), 20), tx())
         code, rw = quit(); ok("UI: repeated-nextKey session quits cleanly", code == 0 and not BAD.search(rw), (code, BAD.search(rw)))
+        ok("UI: a truncated album list is not cached", not os.path.exists(cache), cache)
         srv("/_x?loopsec=0")
 finally:
     fake.kill(); mdns.kill(); shutil.rmtree(TMP, ignore_errors=True)

@@ -106,6 +106,8 @@ Settings are read from, in increasing priority:
 
 If no player host is set anywhere, bluplay looks for one on the network (see [Discovery](#player-discovery)).
 
+The album list is cached in `~/.cache/bluplay/` (or `$XDG_CACHE_HOME/bluplay/`), one file per player, so a normal start does not re-read the whole library. It is reloaded automatically when the player's album sections or their counts change, and `u` in the album list always reloads it; deleting the file is always safe.
+
 The config file is plain `key = value`, one per line; `#` starts a comment; values may be quoted.
 
 ```ini
