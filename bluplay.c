@@ -1549,6 +1549,12 @@ static int confirm(const char *text) {
     foot_override = NULL;
     return k == 'y' || k == 'Y';
 }
+/* sort key for g+letter: the item's own key (album list: sk_key(text) + \1 + ..., which orders and prefix-matches
+ * like sk_key(text) alone), else sk_key(text) computed once and kept */
+static const char *jump_key(Item *it) {
+    if (!it->sk) { Buf b = {0}; sk_key(&b, Z(it->text)); it->sk = b.p ? b.p : xstrdup(""); }
+    return it->sk;
+}
 static void jump(Level *L) {
     foot_override = "Jump to letter: "; foot_attr = A_REV; draw();
     int k = modal_key(0);
@@ -1562,25 +1568,20 @@ static void jump(Level *L) {
     build_view();
     if (!*cs || !strcmp(cs, "0")) {
         for (int i = 0; i < nview && hit < 0; i++) {
-            Buf kk = {0}; sk_key(&kk, Z(vi(i)->text)); int f = 0;
-            if (kk.p && *kk.p) u8dec(kk.p, kk.p + strlen(kk.p), &f);
-            if (!(kk.p && *kk.p && cp_alpha(f))) hit = i;
-            bfree(&kk);
+            const char *kk = jump_key(vi(i)); int f = 0;
+            if (*kk) u8dec(kk, kk + strlen(kk), &f);
+            if (!(*kk && cp_alpha(f))) hit = i;
         }
     } else if (cp_alnum(cpf) || cs[0] == '{') {
-        for (int i = 0; i < nview && hit < 0; i++) {
-            Buf kk = {0}; sk_key(&kk, Z(vi(i)->text));
-            if (kk.p && !strncmp(kk.p, cs, strlen(cs))) hit = i;
-            else if (nxt < 0 && L->flat && strcmp(kk.p ? kk.p : "", cs) >= 0) nxt = i;
-            bfree(&kk);
-        }
-        if (hit < 0 && nxt < 0 && L->flat) {}
+        size_t cl = strlen(cs);
+        if (L->flat) {   /* the album list is sorted by these keys: binary search for the first key >= cs */
+            int lo = 0, hi = nview;
+            while (lo < hi) { int mid = lo + (hi - lo) / 2; if (strcmp(jump_key(vi(mid)), cs) < 0) lo = mid + 1; else hi = mid; }
+            if (lo < nview) { if (!strncmp(jump_key(vi(lo)), cs, cl)) hit = lo; else nxt = lo; }
+        } else for (int i = 0; i < nview && hit < 0; i++) if (!strncmp(jump_key(vi(i)), cs, cl)) hit = i;
     } else { bfree(&c); return; }
     if (hit >= 0) { L->sel = hit; say(""); }
     else {
-        if (nxt < 0 && L->flat) {   /* first entry >= c (whole list) */
-            for (int i = 0; i < nview; i++) { Buf kk = {0}; sk_key(&kk, Z(vi(i)->text)); if (strcmp(kk.p ? kk.p : "", cs) >= 0) { nxt = i; bfree(&kk); break; } bfree(&kk); }
-        }
         if (nxt >= 0) L->sel = nxt;
         char up[64]; cpy(up, sizeof up, cs); for (char *p = up; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
         say("Nothing starts with '%s'", up);
