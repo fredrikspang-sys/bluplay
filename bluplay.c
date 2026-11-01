@@ -1326,7 +1326,7 @@ static Item *vi(int i) { Level *L = &stack[nstack - 1]; return &L->items->v[view
 
 /* ---- drawing */
 #define MAXH 300
-static Buf rows[MAXH]; static char *prevrows[MAXH]; static int prevH, prevW;
+static Buf rows[MAXH]; static Buf prevrows[MAXH]; static char prevok[MAXH];   /* last frame's rows (buffers reused) */ static int prevH, prevW;
 static void rput(int y, const char *text, int w, int attr, int right) {
     if (y < 0 || y >= MAXH || w <= 0) return;
     Buf *r = &rows[y];
@@ -1406,12 +1406,12 @@ static const char *foot_sel(void) {
 }
 static void flush_frame(void) {
     Buf o = {0};
-    if (prevH != H || prevW != W || force_redraw) { force_redraw = 0; bputs(&o, "\033[2J"); for (int i = 0; i < MAXH; i++) { free(prevrows[i]); prevrows[i] = NULL; } prevH = H; prevW = W; }
+    if (prevH != H || prevW != W || force_redraw) { force_redraw = 0; bputs(&o, "\033[2J"); memset(prevok, 0, sizeof prevok); prevH = H; prevW = W; }
     for (int y = 0; y < H && y < MAXH; y++) {
         const char *r = rows[y].p ? rows[y].p : "";
-        if (prevrows[y] && !strcmp(prevrows[y], r)) continue;
+        if (prevok[y] && !strcmp(prevrows[y].p ? prevrows[y].p : "", r)) continue;
         bprintf(&o, "\033[%d;1H", y + 1); bputs(&o, r);
-        free(prevrows[y]); prevrows[y] = xstrdup(r);
+        breset(&prevrows[y]); bputs(&prevrows[y], r); prevok[y] = 1;
     }
     if (o.n) wr_all(o.p, o.n);
     bfree(&o);
