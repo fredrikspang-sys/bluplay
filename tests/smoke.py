@@ -25,12 +25,15 @@ def ok(name, cond, detail=""):
 def free_port(kind=socket.SOCK_STREAM):
     s = socket.socket(socket.AF_INET, kind); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
-PORT = free_port(); SPORT = free_port(); WPORT = free_port(); MPORT = free_port(socket.SOCK_DGRAM); DEAD = free_port(socket.SOCK_DGRAM)
+PORT = free_port(); SPORT = free_port(); WPORT = free_port(); MPORT = free_port(socket.SOCK_DGRAM); DEAD = free_port(socket.SOCK_DGRAM); LPORT = free_port(socket.SOCK_DGRAM); LDEAD = free_port(socket.SOCK_DGRAM)
 TMP = tempfile.mkdtemp(prefix="bluplay-test-")
 fake = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_player.py"), str(PORT)], env=dict(os.environ, FAKE_QN="20", FAKE_LOG=os.path.join(TMP, "req.log"), FAKE_SETTINGS_PORT=str(SPORT), FAKE_WEB_PORT=str(WPORT)),
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 mdns = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_mdns.py"), str(MPORT),
                          "Living Room=127.0.0.1:%d" % PORT, "Kitchen=127.0.0.2:%d/_musp" % PORT],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+lsdp = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_lsdp.py"), str(LPORT),
+                         "Attic=127.0.0.3:%d" % PORT],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def srv(path): return urllib.request.urlopen("http://127.0.0.1:%d%s" % (PORT, path), timeout=10).read().decode()
@@ -44,7 +47,7 @@ for _ in range(100):
 
 def env(**kw):
     e = {k: v for k, v in os.environ.items() if not k.startswith("BLUPLAY_") and k not in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME")}
-    e.update(HOME=TMP, LANG="C.UTF-8", LC_ALL="C.UTF-8", ASAN_OPTIONS="detect_leaks=0", BLUPLAY_MDNS_ADDR="127.0.0.1:%d" % DEAD)
+    e.update(HOME=TMP, LANG="C.UTF-8", LC_ALL="C.UTF-8", ASAN_OPTIONS="detect_leaks=0", BLUPLAY_MDNS_ADDR="127.0.0.1:%d" % DEAD, BLUPLAY_LSDP_ADDR="127.0.0.1:%d" % LDEAD)
     e.update(kw); return e
 def run(args, timeout=20, **kw):
     p = subprocess.run([BIN] + args, env=env(**kw), stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
@@ -64,6 +67,10 @@ try:
     ok("--discover lists both players", rc == 0 and "Living Room" in out and "Kitchen" in out and out.index("Living Room") < out.index("Kitchen") and HOSTARG in out, (rc, out, err))
     rc, out, err = run(["--status"], BLUPLAY_MDNS_ADDR="127.0.0.1:%d" % MPORT)
     ok("--status via discovery uses first player", rc == 0 and "player=" + HOSTARG in out and "using Living Room" in err and "first of several" in err, (rc, out, err))
+    rc, out, err = run(["--discover"], BLUPLAY_LSDP_ADDR="127.0.0.1:%d" % LPORT)
+    ok("--discover via LSDP lists the attic player", rc == 0 and "Attic" in out and "127.0.0.3:%d" % PORT in out and "lsdp._tcp" in out, (rc, out, err))
+    rc, out, err = run(["--discover"], BLUPLAY_MDNS_ADDR="127.0.0.1:%d" % MPORT, BLUPLAY_LSDP_ADDR="127.0.0.1:%d" % LPORT)
+    ok("--discover merges mDNS and LSDP without a duplicate Living Room", rc == 0 and out.count("Living Room") == 1 and "Kitchen" in out and "Attic" in out, (rc, out, err))
     rc, out, err = run(["--status", "--host", HOSTARG]); ok("--status --host", rc == 0 and "state=play" in out and "file=/mnt/music/" in out, (rc, out, err))
     rc, out, err = run(["--status", "-H", "127.0.0.1", "-p", str(PORT)]); ok("--status -H host -p port", rc == 0 and "state=play" in out, (rc, err))
     rc, out, err = run(["--status"], BLUPLAY_HOST="127.0.0.1", BLUPLAY_PORT=str(PORT)); ok("env BLUPLAY_HOST + BLUPLAY_PORT", rc == 0 and "state=play" in out, (rc, err))
@@ -408,6 +415,6 @@ try:
         ok("sleep: volume never set above the original in any session", all(v <= 40 for v in levels(rlog().splitlines())), "")
         srv("/_x?sleep=0")
 finally:
-    fake.kill(); mdns.kill(); shutil.rmtree(TMP, ignore_errors=True)
+    fake.kill(); mdns.kill(); lsdp.kill(); shutil.rmtree(TMP, ignore_errors=True)
 print("\n%d/%d checks passed" % (total - fails, total))
 sys.exit(1 if fails else 0)

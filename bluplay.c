@@ -35,6 +35,8 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <net/if.h>
+#include <ifaddrs.h>
 #include <sys/wait.h>
 
 /* ---------------------------------------------------------------- utils */
@@ -2952,11 +2954,13 @@ static void cfg_apply_shares(void) {
     if (CFG.shares[0]) shares_parse(CFG.shares);
 }
 
-/* ---------------------------------------------------------------- player discovery (mDNS / DNS-SD)
+/* ---------------------------------------------------------------- player discovery (mDNS / DNS-SD and LSDP)
  * Sends a one-shot ("legacy unicast", RFC 6762 6.7) PTR query for the BluOS service types to
  * 224.0.0.251:5353 from an ephemeral port; responders answer directly to that port. Answers are
  * PTR (instance), SRV (port + target host) and A (IPv4) records; if no A record is given the
- * source address of the answer is used. Falls back to "avahi-browse" if nothing is found. */
+ * source address of the answer is used. In the same window a LSDP query-all is sent to each
+ * usable IPv4 interface's directed broadcast (UDP 11430). Falls back to "avahi-browse" if
+ * nothing is found. */
 typedef struct { char name[128], addr[64], svc[16]; int port; } Player;
 #define MAX_PLAYERS 16
 static Player PLAYERS[MAX_PLAYERS]; static int nPLAYERS;
@@ -3042,31 +3046,177 @@ static int mdns_query(int fd, const struct sockaddr_in *dst) {
     q[5] = (unsigned char)nq;
     return sendto(fd, q, o, 0, (const struct sockaddr *)dst, sizeof *dst) < 0 ? -1 : 0;
 }
+/* LSDP (Lenbrook Service Discovery Protocol): UDP 11430, magic "LSDP", version 1.
+ * A query-all packet is sent to each usable IPv4 interface's directed broadcast;
+ * announce replies carry the player name, IPv4 address and API port (default 11000).
+ * BLUPLAY_LSDP_ADDR=host:port sends the query only there (test hook). */
+#define LSDP_PORT 11430
+static const unsigned char LSDP_QUERY[] = { 0x06, 'L', 'S', 'D', 'P', 0x01, 0x05, 0x51, 0x01, 0xff, 0xff };
+
+static int lsdp_take(const unsigned char *m, size_t n, size_t *off, size_t want, const unsigned char **p) {
+    if (*off > n || n - *off < want) return -1;
+    *p = m + *off; *off += want; return 0;
+}
+static int lsdp_u8(const unsigned char *m, size_t n, size_t *off, unsigned *v) {
+    const unsigned char *p; if (lsdp_take(m, n, off, 1, &p)) return -1; *v = *p; return 0;
+}
+static int lsdp_field(const unsigned char *m, size_t n, size_t *off, const unsigned char **p, unsigned *len) {
+    if (lsdp_u8(m, n, off, len)) return -1;
+    return lsdp_take(m, n, off, *len, p);
+}
+
+/* 1 if this is a player announce; name/addr/port are filled. Queries, deletes and junk are 0. */
+static int lsdp_parse(const unsigned char *m, size_t n, const char *src, char *name, size_t ncap, char *addr, size_t acap, int *port) {
+    size_t off = 0; unsigned v, ipl, nrec, cls, nf, kl, vl; const unsigned char *p, *ip, *k, *val;
+    if (lsdp_u8(m, n, &off, &v) || v != 6) return 0;
+    if (lsdp_take(m, n, &off, 4, &p) || memcmp(p, "LSDP", 4)) return 0;
+    if (lsdp_u8(m, n, &off, &v) || v != 1) return 0;
+    if (lsdp_u8(m, n, &off, &v) || lsdp_u8(m, n, &off, &v) || v != 0x41) return 0;   /* announce only */
+    if (lsdp_field(m, n, &off, &p, &v)) return 0;                                   /* node id */
+    if (lsdp_field(m, n, &off, &ip, &ipl)) return 0;
+    addr[0] = 0;
+    if (ipl == 4 && (ip[0] | ip[1] | ip[2] | ip[3]))
+        snprintf(addr, acap, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    else if (src && src[0]) cpy(addr, acap, src);
+    if (!addr[0]) return 0;
+    if (lsdp_u8(m, n, &off, &nrec)) return 0;
+    name[0] = 0; *port = 0; int physical = 0;
+    for (unsigned r = 0; r < nrec; r++) {
+        if (lsdp_take(m, n, &off, 2, &p)) return 0;
+        cls = ((unsigned)p[0] << 8) | p[1];
+        int phys = (cls == 1 || cls == 2 || cls == 3 || cls == 6 || cls == 8);
+        if (lsdp_u8(m, n, &off, &nf)) return 0;
+        char recname[128] = ""; int recport = 0;
+        for (unsigned f = 0; f < nf; f++) {
+            if (lsdp_field(m, n, &off, &k, &kl) || lsdp_field(m, n, &off, &val, &vl)) return 0;
+            if (kl == 4 && !memcmp(k, "name", 4) && !recname[0]) {
+                size_t L = vl < sizeof recname - 1 ? vl : sizeof recname - 1;
+                memcpy(recname, val, L); recname[L] = 0;
+            }
+            if (kl == 4 && !memcmp(k, "port", 4) && !recport) {
+                char tmp[16]; size_t L = vl < sizeof tmp - 1 ? vl : sizeof tmp - 1;
+                memcpy(tmp, val, L); tmp[L] = 0;
+                int pr = atoi(tmp); if (pr > 0 && pr <= 65535) recport = pr;
+            }
+        }
+        if (!phys) continue;
+        physical = 1;
+        if (!name[0]) cpy(name, ncap, recname);
+        if (!*port) *port = recport;
+    }
+    if (!physical) return 0;
+    if (!name[0]) cpy(name, ncap, addr);
+    if (*port <= 0) *port = 11000;
+    return 1;
+}
+
+static int lsdp_dests(struct sockaddr_in *out, int cap) {
+    const char *ov = getenv("BLUPLAY_LSDP_ADDR");
+    if (ov && *ov) {
+        char h[64]; const char *c = strrchr(ov, ':');
+        if (!c || cap < 1) return 0;
+        cpy(h, sizeof h, ov); if ((size_t)(c - ov) < sizeof h) h[c - ov] = 0;
+        memset(out, 0, sizeof *out); out->sin_family = AF_INET;
+        out->sin_port = htons((uint16_t)atoi(c + 1));
+        return inet_pton(AF_INET, h, &out->sin_addr) == 1 ? 1 : 0;
+    }
+    struct ifaddrs *ifs = NULL;
+    if (getifaddrs(&ifs) != 0) return 0;
+    int n = 0;
+    for (struct ifaddrs *a = ifs; a && n < cap; a = a->ifa_next) {
+        if (!a->ifa_addr || a->ifa_addr->sa_family != AF_INET) continue;
+        if (!(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK)) continue;
+        if (!(a->ifa_flags & IFF_BROADCAST) || !a->ifa_broadaddr) continue;
+        if (a->ifa_broadaddr->sa_family != AF_INET) continue;
+        unsigned char *b = (unsigned char *)&((struct sockaddr_in *)a->ifa_addr)->sin_addr;
+        if (b[0] == 169 && b[1] == 254) continue;
+        if (b[0] == 0 || b[0] >= 224) continue;
+        struct sockaddr_in br = *(struct sockaddr_in *)a->ifa_broadaddr;
+        int dup = 0;
+        for (int i = 0; i < n; i++) if (out[i].sin_addr.s_addr == br.sin_addr.s_addr) dup = 1;
+        if (dup) continue;
+        br.sin_family = AF_INET; br.sin_port = htons(LSDP_PORT);
+        out[n++] = br;
+    }
+    freeifaddrs(ifs);
+    return n;
+}
+
+static void lsdp_send(int fd, const struct sockaddr_in *dsts, int ndst) {
+    for (int i = 0; i < ndst; i++)
+        sendto(fd, LSDP_QUERY, sizeof LSDP_QUERY, 0, (const struct sockaddr *)(dsts + i), sizeof dsts[i]);
+}
+
+static int lsdp_open(struct sockaddr_in *dsts, int cap, int *ndst) {
+    *ndst = lsdp_dests(dsts, cap);
+    if (*ndst <= 0) return -1;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+#ifdef SO_REUSEPORT
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+#endif
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
+    struct sockaddr_in a; memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_port = htons(LSDP_PORT); a.sin_addr.s_addr = INADDR_ANY;
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+        a.sin_port = 0;
+        if (bind(fd, (struct sockaddr *)&a, sizeof a) != 0) { close(fd); return -1; }
+    }
+    return fd;
+}
+
+typedef struct { char name[128], addr[64]; int port; } LsdpHit;
+static void lsdp_ingest(int fd, LsdpHit *hits, int *nhits, int cap) {
+    unsigned char buf[2048]; struct sockaddr_in from; socklen_t fl = sizeof from;
+    ssize_t k = recvfrom(fd, buf, sizeof buf, 0, (struct sockaddr *)&from, &fl);
+    if (k <= 0) return;
+    char src[64], name[128], addr[64]; int port = 0;
+    inet_ntop(AF_INET, &from.sin_addr, src, sizeof src);
+    if (!lsdp_parse(buf, (size_t)k, src, name, sizeof name, addr, sizeof addr, &port)) return;
+    for (int i = 0; i < *nhits; i++) if (!strcmp(hits[i].addr, addr) && hits[i].port == port) return;
+    if (*nhits >= cap) return;
+    LsdpHit *h = &hits[(*nhits)++];
+    cpy(h->name, sizeof h->name, name); cpy(h->addr, sizeof h->addr, addr); h->port = port;
+}
 static void mdns_discover(double tmo) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return;
     struct sockaddr_in dst; memset(&dst, 0, sizeof dst); dst.sin_family = AF_INET;
     dst.sin_port = htons(5353); inet_pton(AF_INET, "224.0.0.251", &dst.sin_addr);
     const char *ov = getenv("BLUPLAY_MDNS_ADDR");   /* test hook: send the query to ip:port instead */
     if (ov && *ov) { char h[64]; const char *c = strrchr(ov, ':'); cpy(h, sizeof h, ov); if (c && (size_t)(c - ov) < sizeof h) { h[c - ov] = 0; dst.sin_port = htons((uint16_t)atoi(c + 1)); } inet_pton(AF_INET, h, &dst.sin_addr); }
-    unsigned char ttl = 255; setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof ttl);
+    if (fd >= 0) { unsigned char ttl = 255; setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof ttl); }
+    struct sockaddr_in ldst[16]; int nldst = 0; int lfd = lsdp_open(ldst, 16, &nldst);
+    LsdpHit lhits[16]; int nlhits = 0;
     MRec recs[64]; ARec as[64]; int nrec = 0, nas = 0;
     double t0 = mono(), dl = t0 + tmo; int sent = 0;
-    while (!got_sig) {
+    while (!got_sig && (fd >= 0 || lfd >= 0)) {
         double now = mono();
         if (now >= dl) break;
-        if (sent == 0 || (sent == 1 && now - t0 >= 0.3) || (sent == 2 && now - t0 >= 1.0)) { mdns_query(fd, &dst); sent++; }
-        struct pollfd pf = { fd, POLLIN, 0 };
+        if (sent == 0 || (sent == 1 && now - t0 >= 0.3) || (sent == 2 && now - t0 >= 1.0)) {
+            if (fd >= 0) mdns_query(fd, &dst);
+            if (lfd >= 0) lsdp_send(lfd, ldst, nldst);
+            sent++;
+        }
+        struct pollfd pf[2]; int np = 0, im = -1, il = -1;
+        if (fd >= 0) { im = np; pf[np].fd = fd; pf[np].events = POLLIN; pf[np++].revents = 0; }
+        if (lfd >= 0) { il = np; pf[np].fd = lfd; pf[np].events = POLLIN; pf[np++].revents = 0; }
         double nxt = dl; if (sent < 3) { double r = t0 + (sent == 1 ? 0.3 : 1.0); if (r < nxt) nxt = r; }
-        int r = xpoll(&pf, 1, (int)((nxt - now) * 1000) + 1);
+        int r = xpoll(pf, (nfds_t)np, (int)((nxt - now) * 1000) + 1);
         if (r <= 0) continue;
-        unsigned char buf[9000]; struct sockaddr_in from; socklen_t fl = sizeof from;
-        ssize_t k = recvfrom(fd, buf, sizeof buf, 0, (struct sockaddr *)&from, &fl);
-        if (k <= 0) continue;
-        char src[64]; inet_ntop(AF_INET, &from.sin_addr, src, sizeof src);
-        mdns_parse(buf, (size_t)k, src, recs, &nrec, as, &nas);
+        if (im >= 0 && pf[im].revents) {
+            unsigned char buf[9000]; struct sockaddr_in from; socklen_t fl = sizeof from;
+            ssize_t k = recvfrom(fd, buf, sizeof buf, 0, (struct sockaddr *)&from, &fl);
+            if (k > 0) {
+                char src[64]; inet_ntop(AF_INET, &from.sin_addr, src, sizeof src);
+                mdns_parse(buf, (size_t)k, src, recs, &nrec, as, &nas);
+            }
+        }
+        if (il >= 0 && pf[il].revents) lsdp_ingest(lfd, lhits, &nlhits, 16);
     }
-    close(fd);
+    if (fd >= 0) close(fd);
+    if (lfd >= 0) close(lfd);
     for (int pass = 0; MDNS_SVC[pass]; pass++)   /* _musc first, then _musp, _musz */
         for (int i = 0; i < nrec; i++) {
             if (strncmp(recs[i].svc, MDNS_SVC[pass], 5)) continue;
@@ -3074,6 +3224,7 @@ static void mdns_discover(double tmo) {
             for (int j = 0; j < nas; j++) if (recs[i].target[0] && !strcasecmp(as[j].host, recs[i].target)) { addr = as[j].addr; break; }
             player_add(recs[i].label, addr, recs[i].port ? recs[i].port : 11000, recs[i].svc);
         }
+    for (int i = 0; i < nlhits; i++) player_add(lhits[i].name, lhits[i].addr, lhits[i].port, "lsdp");
 }
 static int in_path(const char *prog) {
     const char *p = getenv("PATH"); if (!p) return 0;
@@ -3536,7 +3687,7 @@ static int pick_host(int interactive, int quiet, int can_wait) {
         return 0;
     }
     if (!CFG.discovery) { no_player_help(); return -1; }
-    if (!quiet) { fprintf(stderr, "bluplay: no player configured, searching the network (mDNS)...\n"); fflush(stderr); }
+    if (!quiet) { fprintf(stderr, "bluplay: no player configured, searching the network...\n"); fflush(stderr); }
     discover(CFG.disc_tmo);
     if (!nPLAYERS && can_wait) {   /* TUI: start anyway and keep searching in the background */
         fprintf(stderr, "bluplay: no player found yet, waiting for one to appear...\n");
@@ -3554,7 +3705,7 @@ static int pick_host(int interactive, int quiet, int can_wait) {
     char hp[96]; xsnprintf(hp, sizeof hp, "%s:%d", PLAYERS[pick].addr, PLAYERS[pick].port);
     if (resolve_host(hp, 0) < 0) { fprintf(stderr, "bluplay: %s\n", ERR); return -1; }
     fprintf(stderr, "bluplay: using %s (%s)%s\n", PLAYERS[pick].name, hp, nPLAYERS > 1 && !interactive ? " - first of several found, use --discover to list them" : "");
-    snprintf(msg, sizeof msg, "Player: %s (%s), found via mDNS", PLAYERS[pick].name, hp);
+    snprintf(msg, sizeof msg, "Player: %s (%s), found on the network", PLAYERS[pick].name, hp);
     return 0;
 }
 /* ---- background discovery for the TUI when no player was found at startup (forked child -> pipe, never blocks keys) */
@@ -3624,7 +3775,7 @@ static void usage(FILE *o) {
           "       bluplay [options] FILE|DIR...      play files now (rest of the folder queued after it), then the player\n"
           "       bluplay [options] --status | --queue | --reindex | --shares | --discover\n\n"
           "options:\n"
-          "  -H, --host HOST[:PORT]     player address (default: discovered via mDNS)\n"
+          "  -H, --host HOST[:PORT]     player address (default: discovered via mDNS or LSDP)\n"
           "  -p, --port PORT            player HTTP port (default 11000)\n"
           "  -L, --library-root DIR     local directory holding the player's music share\n"
           "  -P, --player-root PATH     the same directory as the player sees it (see 'file=' in --status)\n"
@@ -3722,7 +3873,7 @@ static int tui(void) {
 }
 static int discover_cli(void) {
     discover(CFG.disc_tmo);
-    if (!nPLAYERS) { fprintf(stderr, "bluplay: no BluOS players found (mDNS%s)\n", in_path("avahi-browse") ? " and avahi-browse" : ""); return 1; }
+    if (!nPLAYERS) { fprintf(stderr, "bluplay: no BluOS players found (mDNS, LSDP%s)\n", in_path("avahi-browse") ? " and avahi-browse" : ""); return 1; }
     for (int i = 0; i < nPLAYERS; i++) printf("%s:%d\t%s\t%s._tcp\n", PLAYERS[i].addr, PLAYERS[i].port, PLAYERS[i].name, PLAYERS[i].svc);
     return 0;
 }
