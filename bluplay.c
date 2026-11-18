@@ -247,7 +247,7 @@ static struct sockaddr_in SA;
 static char HOST[128];   /* "host:port" as used in the Host: header */
 
 static void set_nb(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); fcntl(fd, F_SETFD, FD_CLOEXEC); }
-static int tcp_start(int *inprog) {
+static int tcp_start_to(const struct sockaddr_in *sa, int *inprog) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     set_nb(fd);
@@ -255,11 +255,12 @@ static int tcp_start(int *inprog) {
 #ifdef SO_NOSIGPIPE
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
-    int r = connect(fd, (struct sockaddr *)&SA, sizeof SA);
+    int r = connect(fd, (const struct sockaddr *)sa, sizeof *sa);
     if (r < 0 && errno != EINPROGRESS) { int e = errno; close(fd); errno = e; return -1; }
     *inprog = r < 0;
     return fd;
 }
+static int tcp_start(int *inprog) { return tcp_start_to(&SA, inprog); }
 static int wait_fd(int fd, short ev, double deadline) {   /* 1 ready, 0 timeout, -1 error/signal */
     for (;;) {
         double rem = deadline - mono();
@@ -276,6 +277,8 @@ static void build_req(Buf *rq, const char *path) {
     bprintf(rq, "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: bluplay/%s\r\nAccept: */*\r\nConnection: close\r\n\r\n", path, HOST, BLUPLAY_VERSION);
 }
 static int HSTATUS;
+static char HLOC[600];   /* Location: of the last response ("" if none) */
+static void wipe(void *p, size_t n) { volatile unsigned char *v = p; while (n--) *v++ = 0; }   /* request buffers that held a password */
 #define MAX_RESP (64u << 20)      /* cap on player responses (memory) */
 #define MAX_POLL_RESP (4u << 20)
 static int hexval(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
@@ -289,7 +292,9 @@ static int resp_parse(Buf *raw, int eof, Buf *body) {
     HSTATUS = sp ? atoi(sp + 1) : 0;
     char *lh = xstrndup(raw->p, hl);
     for (char *q = lh; *q; q++) if (*q >= 'A' && *q <= 'Z') *q += 32;
-    char *cl = strstr(lh, "\ncontent-length:"); char *te = strstr(lh, "\ntransfer-encoding:");
+    char *cl = strstr(lh, "\ncontent-length:"); char *te = strstr(lh, "\ntransfer-encoding:"), *lo = strstr(lh, "\nlocation:");
+    HLOC[0] = 0;
+    if (lo) { const char *v = raw->p + (lo - lh) + 10; while (*v == ' ' || *v == '\t') v++; size_t n = strcspn(v, "\r\n"); if (n < sizeof HLOC) { memcpy(HLOC, v, n); HLOC[n] = 0; } }
     int chunked = 0; long clen = -1;
     if (te) { char *e = strchr(te + 1, '\n'); char *c = strstr(te, "chunked"); if (c && (!e || c < e)) chunked = 1; }
     if (cl) { char *ce; long v = strtol(cl + 16, &ce, 10); clen = (ce == cl + 16 || v < 0) ? -1 : v; }
@@ -319,9 +324,10 @@ static int resp_parse(Buf *raw, int eof, Buf *body) {
     if (!eof) return 0;
     bcat(body, b, have); return 1;
 }
-static int http_get(const char *path, double tmo, Buf *body) {
+/* GET (form NULL) or POST form-urlencoded to the player at sa; the request buffer is wiped (it may hold a password) */
+static int http_do(const struct sockaddr_in *sa, const char *hosthdr, const char *path, const char *form, double tmo, Buf *body) {
     double dl = mono() + tmo; int inp;
-    int fd = tcp_start(&inp);
+    int fd = tcp_start_to(sa, &inp);
     if (fd < 0) return fail("socket/connect: %s", strerror(errno));
     if (inp) {
         int w = wait_fd(fd, POLLOUT, dl);
@@ -329,7 +335,13 @@ static int http_get(const char *path, double tmo, Buf *body) {
         int e = 0; socklen_t l = sizeof e; getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &l);
         if (e) { close(fd); return fail("connect: %s", strerror(e)); }
     }
-    Buf rq = {0}; build_req(&rq, path);
+    Buf rq = {0};
+    if (!form) { if (sa == &SA) build_req(&rq, path); else bprintf(&rq, "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: bluplay/%s\r\nAccept: */*\r\nConnection: close\r\n\r\n", path, hosthdr, BLUPLAY_VERSION); }
+    else {
+        bprintf(&rq, "POST %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: bluplay/%s\r\nAccept: */*\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                path, hosthdr, BLUPLAY_VERSION, strlen(form));
+        bputs(&rq, form);
+    }
     size_t off = 0;
     while (off < rq.n) {
         ssize_t k = send(fd, rq.p + off, rq.n - off, 0);
@@ -337,6 +349,7 @@ static int http_get(const char *path, double tmo, Buf *body) {
         if (k < 0 && (errno == EAGAIN || errno == EINTR)) { if (wait_fd(fd, POLLOUT, dl) <= 0) break; continue; }
         break;
     }
+    if (rq.p) wipe(rq.p, rq.cap);
     bfree(&rq);
     Buf raw = {0}; int res = 0, eof = 0; char tmp[8192];
     while (!eof) {
@@ -356,6 +369,7 @@ static int http_get(const char *path, double tmo, Buf *body) {
     if (HSTATUS >= 400) return fail("HTTP Error %d", HSTATUS);
     return 0;
 }
+static int http_get(const char *path, double tmo, Buf *body) { return http_do(&SA, HOST, path, NULL, tmo, body); }
 static void urlq(Buf *b, const char *s, const char *safe, int plus) {
     for (; *s; s++) {
         unsigned char c = *s;
@@ -1366,6 +1380,9 @@ static const char *HELP_LINES[] = {
     "              in memory and re-opens instantly; it is also refetched after indexing.",
     "I             reindex the player's library (y/n); progress 'Indexing: N' at the bottom;",
     "              when done the album list is reloaded. From a shell: bluplay --reindex",
+    "N             network shares: the folders on your NAS/computer the player indexes. space marks, d removes",
+    "              (y/n), a adds one (\\\\server\\share, user name, password), I reindexes. BluOS sends share",
+    "              passwords unencrypted over the network; bluplay never stores them. From a shell: bluplay --shares",
     "Format        the playing track shows its format (e.g. FLAC 24 bit 192 kHz); in the queue the selected track's is shown.",
     "s             shuffle ON/OFF (the player shuffles the play order of the current queue)",
     "r             repeat: off -> queue -> track -> off (off = play the queue only once)",
@@ -2138,6 +2155,7 @@ static void group_ui(void);
 static void preset_ui(void);
 static void pl_save(void);
 static void pl_ui(void);
+static void shares_ui(void);
 static int do_key(int k) {
     int sh = k == K_SUP || k == K_SDOWN || k == K_SPGUP || k == K_SPGDN || k == K_SHOME || k == K_SEND;   /* Shift+movement = extend selection */
     if (sh) k = k == K_SUP ? K_UP : k == K_SDOWN ? K_DOWN : k == K_SPGUP ? K_PGUP : k == K_SPGDN ? K_PGDN : k == K_SHOME ? K_HOME : K_END;
@@ -2185,6 +2203,7 @@ static int do_key(int k) {
     else if (k == 'P') preset_ui();
     else if (k == 'w') pl_save();
     else if (k == 'L') pl_ui();
+    else if (k == 'N') shares_ui();
     else if ((k == ',' || k == '.') && seek_to(pos_now() + (k == '.' ? 10 : -10), &S) < 0) say("Error: %s", ERR);
     else if (k == '?') help_screen();
     else if (k == 'G') group_ui();
@@ -3248,6 +3267,250 @@ static void pl_ui(void) {
     items_free(&pl); force_redraw = 1;
     aj_reconcile();
 }
+/* ---- network shares (music library). Undocumented BluOS settings pages; shapes captured read-only from a NAD C390
+   (BluOS 4.18): /Settings?id=networkShares (served on port 11001; 11000 answers 301) holds an escaped HTML form
+   (action http://PLAYER:80/findremoveshares) with one checkbox per share (input name = the \\host\share path) plus the
+   add form's URL (/cp/AddShare); /Settings?id=addShare lists that form's fields. URLs and field names are read from
+   those pages, requests only ever go to the player's own address, and the password is never shown, logged or kept
+   (request buffers are wiped). The player never sends stored credentials back. */
+#define MAX_NETSHARES 64
+typedef struct { char path[600], label[700], id[64]; int on; } NetShare;
+typedef struct {
+    NetShare v[MAX_NETSHARES]; int n, port;                                   /* port = the one that answered /Settings */
+    char action[600], rmname[64], rmvalue[160], addurl[300];
+    char f_share[64], f_user[64], f_pass[64], perr[200];
+} NetShares;
+static NetShares NS;
+/* player URL ("/path" or "http://HOST[:PORT]/path") -> the player's own address with that port + path.
+   Another host in the URL is ignored on purpose: settings requests never leave the player. */
+static int player_url(const char *url, int defport, struct sockaddr_in *sa, char *hosthdr, size_t hcap, char *path, size_t pcap) {
+    int port = defport; const char *p = url;
+    if (!strncasecmp(p, "http://", 7)) {
+        p += 7; const char *e = p + strcspn(p, ":/?");
+        if (*e == ':') { char *pe; long v = strtol(e + 1, &pe, 10); if (v <= 0 || v > 65535) return fail("bad URL from the player"); port = (int)v; e = pe; }
+        else port = 80;
+        p = *e ? e : "/";
+    } else if (*p != '/') return fail("unexpected URL from the player (%s)", url);
+    *sa = SA; sa->sin_port = htons((unsigned short)port);
+    char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &SA.sin_addr, ip, sizeof ip);
+    xsnprintf(hosthdr, hcap, "%s:%d", ip, port);
+    if (strlen(p) >= pcap) return fail("URL from the player too long");
+    cpy(path, pcap, p); return port;
+}
+/* GET or POST (form != NULL) a settings URL; follows redirects itself (max 4). A POST is re-sent on 307/308 and on a
+   301/302/303 that only moves it to another port or host (11000 -> 11001); another path after a POST is the
+   form's "done" page, so it is not fetched. *port_out = port that answered. A reply with <error> fails. */
+static int sh_http(const char *url0, int defport, const char *form, Buf *body, int *port_out) {
+    char url[600], path[700], hh[64]; struct sockaddr_in sa; cpy(url, sizeof url, url0);
+    for (int hop = 0; ; hop++) {
+        int port = player_url(url, defport, &sa, hh, sizeof hh, path, sizeof path);
+        if (port < 0) return -1;
+        Buf p = {0}; urlq(&p, path, "/?&=%:+,;@!$'()*~", 0);
+        int r = http_do(&sa, hh, p.p, form, 8, body); bfree(&p);
+        if (r < 0) return -1;
+        if (HSTATUS >= 300 && HSTATUS < 400 && HLOC[0]) {
+            if (hop >= 4) return fail("too many redirects from the player");
+            if (form && HSTATUS != 307 && HSTATUS != 308) {
+                struct sockaddr_in s2; char p2[700], h2[64];
+                if (player_url(HLOC, port, &s2, h2, sizeof h2, p2, sizeof p2) < 0 || strcmp(p2, path)) { if (port_out) *port_out = port; break; }
+            }
+            cpy(url, sizeof url, HLOC); defport = port; continue;
+        }
+        if (port_out) *port_out = port;
+        break;
+    }
+    if (body->p && strstr(body->p, "<error")) {
+        char *d = xml_any_text(body->p, "detail"); if (!d || !*trim(d)) { free(d); d = xml_any_text(body->p, "error"); }
+        char *t = d ? trim(d) : NULL;
+        int r = fail("the player said: %s", t && *t ? t : "error"); free(d); return r;
+    }
+    return 0;
+}
+static int player_port(void) { return ntohs(SA.sin_port); }
+/* parse the networkShares settings page */
+static int ns_parse(const char *xml, NetShares *s) {
+    int port = s->port; memset(s, 0, sizeof *s); s->port = port;
+    Tag t; const char *p = xml; char *html = NULL;
+    while ((p = xml_next(p, &t))) {
+        if (t.kind == 2) continue;
+        char *id = tag_attr(&t, "id");
+        if (id && tag_is(&t, "setting") && !strcmp(id, "shares")) { free(html); html = tag_attr(&t, "value"); }
+        else if (id && tag_is(&t, "menuGroup") && !strcmp(id, "addShare")) { char *u = tag_attr(&t, "url"); if (u) cpy(s->addurl, sizeof s->addurl, u); free(u); }
+        free(id);
+    }
+    if (!html) return fail("the player's share page has an unexpected format (firmware changed?)");
+    int form = 0; p = html;
+    while ((p = xml_next(p, &t))) {
+        if (t.kind == 2) continue;
+        if (tag_is(&t, "form")) { char *a = tag_attr(&t, "action"); if (a) { cpy(s->action, sizeof s->action, a); form = 1; } free(a); }
+        else if (tag_is(&t, "input")) {
+            char *ty = tag_attr(&t, "type"), *nm = tag_attr(&t, "name"), *id = tag_attr(&t, "id"), *va = tag_attr(&t, "value");
+            if (ty && nm && !strcasecmp(ty, "checkbox") && s->n < MAX_NETSHARES) {
+                NetShare *x = &s->v[s->n++]; cpy(x->path, sizeof x->path, nm); cpy(x->id, sizeof x->id, id ? id : "");
+            } else if (ty && nm && !strcasecmp(ty, "submit")) { cpy(s->rmname, sizeof s->rmname, nm); cpy(s->rmvalue, sizeof s->rmvalue, va ? va : ""); }
+            free(ty); free(nm); free(id); free(va);
+        } else if (tag_is(&t, "label")) {
+            char *f = tag_attr(&t, "for");
+            if (f) for (int i = 0; i < s->n; i++) if (!strcmp(s->v[i].id, f)) { char *x = xml_text(p); cpy(s->v[i].label, sizeof s->v[i].label, trim(x)); free(x); }
+            free(f);
+        }
+    }
+    free(html);
+    if (!form) return fail("the player's share page has no share form (firmware changed?)");
+    if (!s->rmname[0]) { cpy(s->rmname, sizeof s->rmname, "remove"); cpy(s->rmvalue, sizeof s->rmvalue, "Remove selected shares"); }
+    if (!s->addurl[0]) cpy(s->addurl, sizeof s->addurl, "/cp/AddShare");
+    return 0;
+}
+static int ns_load(NetShares *s) {
+    Buf b = {0}; int port = player_port();
+    int r = sh_http("/Settings?id=networkShares", player_port(), NULL, &b, &port);
+    if (r == 0) { s->port = port; r = ns_parse(b.p ? b.p : "", s); }
+    bfree(&b); return r;
+}
+/* field names of the add form (defaults = what the NAD uses) */
+static void ns_form(NetShares *s) {
+    cpy(s->f_share, sizeof s->f_share, "sharename"); cpy(s->f_user, sizeof s->f_user, "username"); cpy(s->f_pass, sizeof s->f_pass, "password");
+    cpy(s->perr, sizeof s->perr, "NetShare URL must be in the form \\\\computer\\share");
+    Buf b = {0};
+    if (sh_http("/Settings?id=addShare", s->port ? s->port : player_port(), NULL, &b, NULL) == 0 && b.p) {
+        Tag t; const char *p = b.p; int texts = 0;
+        while ((p = xml_next(p, &t))) {
+            if (t.kind == 2) continue;
+            if (tag_is(&t, "menuGroup")) { char *u = tag_attr(&t, "url"); if (u && *u) cpy(s->addurl, sizeof s->addurl, u); free(u); continue; }
+            if (!tag_is(&t, "setting")) continue;
+            char *nm = tag_attr(&t, "name"), *st = tag_attr(&t, "style"), *pt = tag_attr(&t, "pattern"), *pe = tag_attr(&t, "patternError");
+            if (nm && *nm) {
+                if (st && !strcmp(st, "password")) cpy(s->f_pass, sizeof s->f_pass, nm);
+                else if (pt || texts == 0) { cpy(s->f_share, sizeof s->f_share, nm); if (pe && *pe) cpy(s->perr, sizeof s->perr, pe); texts++; }
+                else if (texts == 1) { cpy(s->f_user, sizeof s->f_user, nm); texts++; }
+            }
+            free(nm); free(st); free(pt); free(pe);
+        }
+    }
+    bfree(&b);
+}
+/* \\host\share[\sub] (as the player's pattern ^\\\\(.*?)\\(.*)$, but host and share must not be empty); / -> \ */
+static int ns_path_ok(char *p) {
+    for (char *q = p; *q; q++) if (*q == '/') *q = '\\';
+    if (p[0] != '\\' || p[1] != '\\' || p[2] == '\\' || !p[2]) return 0;
+    const char *b = strchr(p + 2, '\\');
+    return b && b[1] && b[1] != '\\';
+}
+static int ns_add(NetShares *s, const char *path, const char *user, char *pass) {
+    Buf f = {0}; bgrow(&f, 3 * (strlen(path) + strlen(user) + strlen(pass)) + 256);
+    urlq(&f, s->f_share, NULL, 1); bputc(&f, '='); urlq(&f, path, NULL, 1);
+    bputc(&f, '&'); urlq(&f, s->f_user, NULL, 1); bputc(&f, '='); urlq(&f, user, NULL, 1);
+    bputc(&f, '&'); urlq(&f, s->f_pass, NULL, 1); bputc(&f, '='); urlq(&f, pass, NULL, 1);
+    wipe(pass, strlen(pass));
+    Buf b = {0}; int r = sh_http(s->addurl, s->port ? s->port : player_port(), f.p, &b, NULL);
+    wipe(f.p, f.cap); bfree(&f); bfree(&b); return r;
+}
+static int ns_remove(NetShares *s) {
+    Buf f = {0};
+    for (int i = 0; i < s->n; i++) if (s->v[i].on) { if (f.n) bputc(&f, '&'); urlq(&f, s->v[i].path, NULL, 1); bputs(&f, "=on"); }
+    if (!f.n) { bfree(&f); return fail("nothing selected"); }
+    bputc(&f, '&'); urlq(&f, s->rmname, NULL, 1); bputc(&f, '='); urlq(&f, s->rmvalue, NULL, 1);
+    Buf b = {0}; int r = sh_http(s->action, s->port ? s->port : player_port(), f.p, &b, NULL);
+    bfree(&f); bfree(&b); return r;
+}
+static int ns_cli(void) {
+    if (ns_load(&NS) < 0) { fprintf(stderr, "Error: %s\n", ERR); return 1; }
+    if (!NS.n) puts("No network shares on this player");
+    for (int i = 0; i < NS.n; i++) { char p[600]; cpy(p, sizeof p, NS.v[i].path); sanitize(p); puts(p); }
+    return 0;
+}
+static void sh_draw(const NetShares *s, int sel, const char *foot) {
+    term_size();
+    for (int y = 0; y < MAXH; y++) breset(&rows[y]);
+    char line[1500]; int ph = H - 4, top = sel - ph / 2, n = s->n ? s->n : 1;
+    if (top > n - ph) top = n - ph;
+    if (top < 0) top = 0;
+    snprintf(line, sizeof line, "Network shares (%d) - folders the player indexes for its music library", s->n);
+    rput(0, line, W, A_BOLD | A_UL, 0);
+    for (int k = 0; k < ph; k++) {
+        int i = top + k, y = 1 + k;
+        if (!s->n && i == 0) rput(y, "  No network shares on this player (a adds one)", W, A_DIM, 0);
+        else if (i < s->n) { snprintf(line, sizeof line, "  [%c] %s", s->v[i].on ? 'x' : ' ', s->v[i].path); rput(y, line, W, i == sel ? A_REV : 0, 0); }
+        else rput(y, "", W, 0, 0);
+    }
+    if (idx_active) { snprintf(line, sizeof line, "Indexing: %d", IDX.n); rput(H - 3, line, W, 0, 0); } else rput(H - 3, "", W, 0, 0);
+    rput(H - 2, "BluOS sends share passwords unencrypted over the network; bluplay never stores them.", W, A_DIM, 0);
+    rput(H - 1, foot ? foot : "space mark  d remove  a add  I reindex  u reload  Esc/q close", W - 1, foot ? A_REV : A_DIM, 1);
+    flush_frame();
+}
+static int sh_prompt(const NetShares *s, int sel, const char *text, char *buf, size_t cap, int mask) {   /* like prompt(), drawn on the share screen; mask shows * */
+    buf[0] = 0; size_t n = 0; char line[900];
+    for (;;) {
+        int l = snprintf(line, sizeof line, "%s", text);
+        if (mask) { for (const char *q = buf; *q && l < (int)sizeof line - 2; q++) if (((unsigned char)*q & 0xC0) != 0x80) line[l++] = '*'; line[l] = 0; }
+        else l += snprintf(line + l, sizeof line - l, "%s", buf);
+        if (l < (int)sizeof line - 1) { line[l++] = '_'; line[l] = 0; }
+        sh_draw(s, sel, line); wipe(line, sizeof line);
+        int k = pl_key();
+        if (k == K_NONE || k == 27 || k == 3) return 0;
+        if (k == K_IGN) continue;
+        if (k == '\n' || k == '\r') return 1;
+        if (k == 127 || k == 8) { while (n > 0 && ((unsigned char)buf[n - 1] & 0xC0) == 0x80) n--; if (n) n--; buf[n] = 0; }
+        else if (k >= 0x20 && k < 0x110000 && !cp_cc(k) && n + 5 < cap) { n += u8enc(k, buf + n); buf[n] = 0; }
+    }
+}
+static int sh_ask(const NetShares *s, int sel, const char *q) { sh_draw(s, sel, q); int c = pl_key(); return c == 'y' || c == 'Y'; }
+static int sh_reindex_ask(const NetShares *s, int sel, const char *q) {
+    if (idx_active) return 0;
+    if (sh_ask(s, sel, q)) { idx_start(1); return 1; }
+    return 0;
+}
+static void shares_ui(void) {
+    int sel = 0; char foot[900], note[400] = "";   /* note: result of the last action, shown in the bottom line until the next key */
+    say("Loading network shares..."); draw();
+    if (ns_load(&NS) < 0) { say("Error: %s", ERR); return; }
+#define NOTE(...) xsnprintf(note, sizeof note, __VA_ARGS__)
+    for (;;) {
+        if (sel > NS.n - 1) sel = NS.n - 1;
+        if (sel < 0) sel = 0;
+        sh_draw(&NS, sel, note[0] ? note : NULL); note[0] = 0;
+        int k = pl_key();
+        if (k == K_NONE || k == 27 || k == 'q' || k == 3 || k == 'N' || k == 'h' || k == K_LEFT) break;
+        if (k == 'j' || k == K_DOWN) sel++; else if (k == 'k' || k == K_UP) sel--;
+        else if (k == K_PGDN) sel += 15; else if (k == K_PGUP) sel -= 15;
+        else if (k == K_HOME) sel = 0; else if (k == K_END) sel = NS.n - 1;
+        else if (k == ' ' && NS.n) { NS.v[sel].on ^= 1; sel++; }
+        else if (k == 'u') { if (ns_load(&NS) < 0) NOTE("Error: %s", ERR); else NOTE("Reloaded (%d shares)", NS.n); }
+        else if ((k == 'd' || k == K_DEL) && NS.n) {
+            int m = 0; for (int i = 0; i < NS.n; i++) m += NS.v[i].on;
+            if (!m) { NS.v[sel].on = 1; m = 1; }
+            if (m == 1) { for (int i = 0; i < NS.n; i++) if (NS.v[i].on) snprintf(foot, sizeof foot, "Remove share %s? The player stops indexing it. y/n", NS.v[i].path); }
+            else snprintf(foot, sizeof foot, "Remove %d shares? The player stops indexing them. y/n", m);
+            if (!sh_ask(&NS, sel, foot)) { for (int i = 0; i < NS.n; i++) NS.v[i].on = 0; continue; }
+            if (ns_remove(&NS) < 0) { NOTE("Error: %s", ERR); for (int i = 0; i < NS.n; i++) NS.v[i].on = 0; continue; }
+            int before = NS.n;
+            if (ns_load(&NS) < 0) { NOTE("Error: %s", ERR); continue; }
+            say("Removed %d share%s", before - NS.n, before - NS.n == 1 ? "" : "s");
+            if (sh_reindex_ask(&NS, sel, "Share removed. Reindex the library now? y/n")) break;
+        } else if (k == 'a') {
+            char path[600], user[200], pass[200];
+            ns_form(&NS);
+            if (!sh_prompt(&NS, sel, "Add share (\\\\server\\share): ", path, sizeof path, 0)) continue;
+            char *pt = trim(path);
+            if (!*pt) continue;
+            if (!ns_path_ok(pt)) { NOTE("%s", NS.perr); continue; }
+            if (!sh_prompt(&NS, sel, "User name (Enter if none): ", user, sizeof user, 0)) continue;
+            if (!sh_prompt(&NS, sel, "Password (Enter if none): ", pass, sizeof pass, 1)) { wipe(pass, sizeof pass); continue; }
+            sh_draw(&NS, sel, "Adding share...");
+            int r = ns_add(&NS, pt, trim(user), pass); wipe(pass, sizeof pass);
+            if (r < 0) { NOTE("Error: %s", ERR); continue; }
+            if (ns_load(&NS) < 0) { NOTE("Error: %s", ERR); continue; }
+            for (int i = 0; i < NS.n; i++) if (!strcasecmp(NS.v[i].path, pt)) sel = i;
+            say("Added share %s", pt);
+            if (sh_reindex_ask(&NS, sel, "Share added. Reindex the library now? y/n")) break;
+        } else if (k == 'I') {
+            if (idx_active) { say("Indexing already in progress - showing progress"); break; }
+            if (sh_ask(&NS, sel, "Reindex the library? y/n")) { idx_start(1); break; }
+        }
+    }
+#undef NOTE
+    force_redraw = 1;
+}
 static void no_player_help(void) {
     char path[1024]; if (CFG.cfgpath[0]) cpy(path, sizeof path, CFG.cfgpath); else cfg_default_path(path, sizeof path);
     fprintf(stderr,
@@ -3355,7 +3618,7 @@ static void usage(FILE *o) {
     fputs("bluplay " BLUPLAY_VERSION " - a minimalistic terminal music player for BluOS streamers\n\n"
           "usage: bluplay [options]                  start the full-screen player\n"
           "       bluplay [options] FILE|DIR...      play files now (rest of the folder queued after it), then the player\n"
-          "       bluplay [options] --status | --queue | --reindex | --discover\n\n"
+          "       bluplay [options] --status | --queue | --reindex | --shares | --discover\n\n"
           "options:\n"
           "  -H, --host HOST[:PORT]     player address (default: discovered via mDNS)\n"
           "  -p, --port PORT            player HTTP port (default 11000)\n"
@@ -3375,6 +3638,7 @@ static void usage(FILE *o) {
           "      --status               print the player status and exit\n"
           "      --queue                print the play queue and exit\n"
           "      --reindex              rescan the player's library and show progress\n"
+          "      --shares               list the network shares the player indexes (N in the player manages them)\n"
           "      --seek [+|-]SECONDS    jump to that position in the current track (+/-: relative) and exit\n"
           "      --group IP[:PORT]      add that player to this player's group (multi-room) and exit\n"
           "      --ungroup IP[:PORT]    remove that player from the group and exit\n"
@@ -3485,7 +3749,7 @@ int main(int argc, char **argv) {
     else { cfg_default_path(CFG.cfgpath, sizeof CFG.cfgpath); if (CFG.cfgpath[0]) cfg_load(CFG.cfgpath, 0); }
     cfg_env();
 
-    enum { M_TUI, M_STATUS, M_QUEUE, M_REINDEX, M_DISCOVER, M_GROUP, M_UNGROUP, M_SEEK } mode = M_TUI; const char *gip = NULL;
+    enum { M_TUI, M_STATUS, M_QUEUE, M_REINDEX, M_SHARES, M_DISCOVER, M_GROUP, M_UNGROUP, M_SEEK } mode = M_TUI; const char *gip = NULL;
     int no_ui = 0; char **files = xrealloc(NULL, (size_t)argc * sizeof(char *)); int nfiles = 0, only_files = 0;
     for (int i = 1; i < argc; i++) {
         char *a = argv[i], *val = NULL, opt[64];
@@ -3522,6 +3786,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(opt, "--status")) mode = M_STATUS;
         else if (!strcmp(opt, "--queue")) mode = M_QUEUE;
         else if (!strcmp(opt, "--reindex")) mode = M_REINDEX;
+        else if (!strcmp(opt, "--shares")) mode = M_SHARES;
         else if (!strcmp(opt, "--group") || !strcmp(opt, "--ungroup")) { NEEDVAL(); gip = val; mode = opt[2] == 'g' ? M_GROUP : M_UNGROUP; }
         else if (!strcmp(opt, "--seek")) { NEEDVAL(); gip = val; mode = M_SEEK; }
         else if (!strcmp(opt, "--no-ui")) no_ui = 1;
@@ -3534,6 +3799,7 @@ int main(int argc, char **argv) {
     if (pick_host(interactive, mode != M_TUI && mode != M_REINDEX && !nfiles, interactive && !nfiles) < 0) { free(files); return 1; }
     if (msg[0]) { msgt = wall(); have_note = 1; }
     if (mode == M_REINDEX) { reindex_cli(); free(files); return 0; }
+    if (mode == M_SHARES) { free(files); return ns_cli(); }
     if (mode == M_SEEK) {
         free(files); Status st; char *e; long v = strtol(gip, &e, 10);
         if (e == gip || *e) { fprintf(stderr, "bluplay: --seek needs a number of seconds\n"); return 2; }

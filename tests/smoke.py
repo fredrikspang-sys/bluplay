@@ -5,7 +5,7 @@ usage: tests/smoke.py [BINARY]        (default ./bluplay; run from the repo root
 needs: python3 and the 'pyte' terminal emulator module (pip install pyte) for the UI part;
        without pyte only the command-line checks run.
 """
-import os, sys, re, pty, time, fcntl, termios, struct, select, signal, socket, subprocess, tempfile, urllib.request, shutil
+import os, sys, re, pty, time, fcntl, termios, struct, select, signal, socket, subprocess, tempfile, urllib.request, urllib.parse, shutil, html
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./bluplay")
@@ -25,9 +25,9 @@ def ok(name, cond, detail=""):
 def free_port(kind=socket.SOCK_STREAM):
     s = socket.socket(socket.AF_INET, kind); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
-PORT = free_port(); MPORT = free_port(socket.SOCK_DGRAM); DEAD = free_port(socket.SOCK_DGRAM)
+PORT = free_port(); SPORT = free_port(); WPORT = free_port(); MPORT = free_port(socket.SOCK_DGRAM); DEAD = free_port(socket.SOCK_DGRAM)
 TMP = tempfile.mkdtemp(prefix="bluplay-test-")
-fake = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_player.py"), str(PORT)], env=dict(os.environ, FAKE_QN="20", FAKE_LOG=os.path.join(TMP, "req.log")),
+fake = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_player.py"), str(PORT)], env=dict(os.environ, FAKE_QN="20", FAKE_LOG=os.path.join(TMP, "req.log"), FAKE_SETTINGS_PORT=str(SPORT), FAKE_WEB_PORT=str(WPORT)),
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 mdns = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_mdns.py"), str(MPORT),
                          "Living Room=127.0.0.1:%d" % PORT, "Kitchen=127.0.0.2:%d/_musp" % PORT],
@@ -54,6 +54,7 @@ HOSTARG = "127.0.0.1:%d" % PORT
 try:
     # ---- command line, configuration, discovery
     rc, out, err = run(["--version"]); ok("--version", rc == 0 and out.startswith("bluplay "), (rc, out))
+    rc, out, err = run(["--shares", "--host", HOSTARG]); ok("--shares lists the network shares (301 to the settings port followed)", rc == 0 and out.splitlines() == ["\\\\10.0.0.5\\Media\\Music", "\\\\nas.example\\Rock & Roll"], (rc, out, err))
     rc, out, err = run(["--help"]); ok("--help", rc == 0 and "BLUPLAY_HOST" in out and "--discover" in out, rc)
     rc, out, err = run(["--bogus"]); ok("unknown option -> exit 2", rc == 2 and "unknown option" in err, (rc, err))
     rc, out, err = run(["--status", "--no-discover"]); ok("nothing configured, discovery off -> help message", rc == 1 and "no BluOS player configured" in err and "--host" in err, (rc, err))
@@ -218,6 +219,34 @@ try:
         key(b"n"); ok("UI: n keeps the playlist", "Second" in srv("/Playlists"), srv("/Playlists"))
         key(b"d"); key(b"y"); ok("UI: d + y deletes it (player's delete actionURL)", wait(lambda: "Second" not in srv("/Playlists") and "Saved playlists (1)" in scr.display[0]), (srv("/Playlists"), text()))
         key(b"\x1b", 0.6); ok("UI: Esc closes the playlist list", wait(lambda: "Queue (" in text() and "Saved playlists" not in text()), text())
+        # ---- network shares (N): list, remove (y/n), add (pattern check, password masked), redirects, reindex
+        PW = "s3cr3t-Pw&x"
+        def shares(): return [html.unescape(html.unescape(x)) for x in re.findall(r'name=&#34;(.*?)&#34; id=&#34;checkbox', urllib.request.urlopen("http://127.0.0.1:%d/Settings?id=networkShares" % SPORT, timeout=10).read().decode())]
+        key(b"N"); ok("UI: N lists the network shares", wait(lambda: "Network shares (2)" in scr.display[0] and "[ ] \\\\10.0.0.5\\Media\\Music" in text() and "\\\\nas.example\\Rock & Roll" in text()), text())
+        ok("UI: share screen says passwords go unencrypted", "unencrypted" in text(), text())
+        key(b"j"); key(b"d"); ok("UI: d asks before removing a share", "Remove share \\\\nas.example\\Rock & Roll?" in scr.display[-1], scr.display[-1])
+        key(b"n"); ok("UI: n keeps the share", len(shares()) == 2 and "[ ]" in text(), (shares(), text()))
+        key(b" "); key(b"d"); key(b"y", 0.8); ok("UI: space + d + y removes it (form POST, 302 = done)", wait(lambda: "Network shares (1)" in scr.display[0]) and shares() == ["\\\\10.0.0.5\\Media\\Music"] and "Reindex the library now?" in scr.display[-1], (shares(), text()))
+        key(b"n"); key(b"a"); ok("UI: a asks for the share path", "Add share (\\\\server\\share):" in scr.display[-1], scr.display[-1])
+        key(b"nas/Music\r", 0.8); ok("UI: a bad share path is refused locally", wait(lambda: "must be in the form" in text()) and len(shares()) == 1, text())
+        key(b"a"); key(("\\\\nas.example\\Lossless\r").encode()); key(b"fredrik\r"); ok("UI: password prompt", "Password (Enter if none):" in scr.display[-1], scr.display[-1])
+        key(PW.encode()); ok("UI: password is masked", "*" * len(PW) in scr.display[-1] and PW not in text(), scr.display[-1])
+        key(b"\r", 0.8); ok("UI: share added (POST with user + password)", wait(lambda: "Network shares (2)" in scr.display[0] and "\\\\nas.example\\Lossless" in text()) and '<creds user="fredrik" pwlen="%d"/>' % len(PW) in srv("/_x?creds=1"), (shares(), text()))
+        key(b"n"); srv("/_x?shareredirect=1")
+        key(b"a"); key(b"//nas.example/Jazz\r"); key(b"\r"); key(b"\r", 0.8)
+        ok("UI: 307 redirect re-POSTs the add; / is accepted as \\", wait(lambda: "\\\\nas.example\\Jazz" in shares()), shares())
+        key(b"n"); srv("/_x?addurl=main")
+        key(b"a"); key(b"\\\\10.0.0.6\\Classical\r"); key(b"\r"); key(b"\r", 0.8)
+        ok("UI: add form on port 11000 answering 301 -> re-POSTed on the settings port", wait(lambda: "\\\\10.0.0.6\\Classical" in shares()), (shares(), scr.display[-1]))
+        key(b"n"); srv("/_x?addurl=rel")
+        key(b"a"); key(b"\\\\10.0.0.6\\Classical\r"); key(b"\r"); key(b"\r", 0.8)
+        ok("UI: the player's <error> is shown", wait(lambda: "the player said: Share already exists" in text()), text())
+        key(b"N"); key(b"I"); ok("UI: I in the share screen asks before reindexing", wait(lambda: "Reindex the library? y/n" in scr.display[-1]), scr.display[-1])
+        key(b"y", 1.0); ok("UI: y starts the reindex and closes the share screen", wait(lambda: "Queue (" in text() and "Network shares" not in text()), text())
+        wait(lambda: "Indexing done" in text(), 10)
+        ok("UI: the password never reaches the screen", PW.encode() not in raw[0], "")
+        ok("UI: request log has paths only (no password)", PW not in open(os.path.join(TMP, "req.log")).read() and "POST /cp/AddShare" in open(os.path.join(TMP, "req.log")).read(), "")
+        srv("/_x?shares=" + urllib.parse.quote("\\\\10.0.0.5\\Media\\Music|\\\\nas.example\\Rock & Roll"))
         key(b"D"); ok("UI: D asks to clear", "Clear the whole queue" in text(), scr.display[-1])
         key(b"y"); ok("UI: y clears queue", wait(lambda: qlen() == 0) and wait(lambda: "Queue (0)" in text()), qlen())
         key(b"\t"); key(b"A"); ok("UI: A on album plays now", wait(lambda: qlen() > 0), qlen())

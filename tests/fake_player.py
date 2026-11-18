@@ -6,6 +6,18 @@ Implements the subset of the BluOS HTTP API that bluplay uses (/Status with long
 /Clear, /Reindex, /Stop, /Move, /Sleep, /Presets, /Preset, /Volume?mute,
 /Save, /Playlists, saved playlists under /Browse?key=BluOS:, /Load, /Delete?name=) on 127.0.0.1, backed by a small invented music library.
 
+Network shares (music library), shaped like a NAD C390 (BluOS 4.18), with invented addresses:
+  PORT    /Settings?id=... answers 301 to the settings port (like the real player: 11000 -> 11001);
+          a POST /cp/AddShare here is also answered 301 to the settings port
+  PORT+1  /Settings?id=networkShares|addShare|library, POST /cp/AddShare (sharename, username, password)
+          (FAKE_SETTINGS_PORT overrides the port)
+  PORT+2  stands in for the player's port 80: POST /findremoveshares (PATH=on&remove=...) answers 302 to /sharecfg
+          (FAKE_WEB_PORT overrides the port)
+  /_x?shares=PATH1|PATH2 sets the share list (empty: none); /_x?shareredirect=1 makes the next POST /cp/AddShare
+  answer 307 to /cp/AddShare2 (which adds); /_x?addurl=main|rel points the add form at PORT (301 -> re-POST) or
+  back to the relative /cp/AddShare; /_x?creds=1 -> <creds user=".." pwlen="N"/> of the last add.
+  Passwords are kept only as a length; FAKE_LOG gets request paths, never bodies.
+
 usage: fake_player.py [PORT]            (default 11000)
 env:   FAKE_QN=N    initial queue length (default 4)
        FAKE_LAT=MS  added latency per request (default 0)
@@ -18,7 +30,7 @@ Test-only control endpoint: /_x?resetq=N&song=I&state=play|pause|stop&vol=V
        either pauses the player (after S seconds, like most BluOS firmware) or keeps playing (like the NAD)
   /_x?fixed=1 fixed volume (/Status and /Volume report -1, level changes are ignored)
 """
-import http.server, socketserver, urllib.parse as up, sys, time, os, random, hashlib, threading
+import http.server, socketserver, urllib.parse as up, sys, time, os, random, hashlib, threading, re
 from xml.sax.saxutils import escape, quoteattr as qa
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 11000
@@ -131,6 +143,44 @@ def browse(k, q=""):
                 qa("/Add?playlist=%s&playnow=-1&service=BluOS&where=last" % n), qa("/Delete?name=%s&service=BluOS" % n)))
     return '<browse serviceName="?"></browse>'
 
+SPORT = int(os.environ.get("FAKE_SETTINGS_PORT", PORT + 1)); WPORT = int(os.environ.get("FAKE_WEB_PORT", PORT + 2))
+SHARES = ["\\\\10.0.0.5\\Media\\Music", "\\\\nas.example\\Rock & Roll"]
+NS = {"redirect": 0, "user": "", "pwlen": -1, "addurl": "/cp/AddShare"}
+SHARE_STYLE = ("<style>\n.heading{font-weight:600;margin:0 0 8px 0;}\n#configshareform{font-family:inherit;color:inherit;}\n"
+               "#configshareform input[type=checkbox]{width:18px;height:18px;accent-color:#4a9eff;margin:0;flex:0 0 auto;cursor:pointer;}\n"
+               "#configshareform label{cursor:pointer;flex:1;overflow-wrap:break-word;}\n</style>")
+def share_html():
+    rows = ""
+    for i, sp in enumerate(SHARES):
+        host, _, rest = sp[2:].partition("\\")
+        rows += '<div class="row"><input name="%s" id="checkbox%d" type="checkbox" /><label for="checkbox%d">%s on %s (%s)</label></div>' % (
+            escape(sp, {'"': "&quot;"}), i + 1, i + 1, escape(rest), escape(host), escape(sp))
+    return SHARE_STYLE + ('<form id="configshareform" method="POST" action="http://127.0.0.1:%d/findremoveshares"><fieldset>%s</fieldset>'
+                          '<input type="submit" name="remove" value="Remove selected shares" /></form>') % (WPORT, rows)
+def settings(i):
+    if i == "networkShares":
+        return ('<settings pageId="networkShares" schemaVersion="28"><menuGroup id="networkShares" displayName="Network Shares" refresh="true">'
+                '<setting id="shares" name="shares" displayName="Current music shares" class="html" value="%s" readonly="true"></setting>'
+                '<menuGroup id="addShare" displayName="Add shares" url="%s" class="form" buttonText="Add share" notification="Share added" closeOnInvoke="true"></menuGroup>'
+                '</menuGroup></settings>') % (escape(share_html(), {'"': "&#34;", "\n": "&#xA;"}), escape(NS["addurl"]))
+    if i == "addShare":
+        return ('<settings pageId="addShare" schemaVersion="28"><menuGroup id="addShare" displayName="Add shares" url="/cp/AddShare" class="form" buttonText="Add share" notification="Share added" closeOnInvoke="true">'
+                '<setting id="sharename" name="sharename" displayName="Enter share name (as \\\\ComputerName\\share)" class="text" pattern="^\\\\\\\\(.*?)\\\\(.*)$" '
+                'patternError="Share URL must be in the form \\\\computer\\share" requiredError="This field is required." required="true"></setting>'
+                '<setting id="username" name="username" displayName="User name (if required)" class="text"></setting>'
+                '<setting id="password" name="password" displayName="Password (if required)" class="text" style="password"></setting></menuGroup></settings>')
+    if i == "library":
+        return ('<settings pageId="library" schemaVersion="28"><menuGroup id="library" displayName="Music library">'
+                '<setting id="sharecfg" displayName="Network shares" description=%s><webview url="http://127.0.0.1:%d/sharecfg?noheader=1"></webview></setting>'
+                '<setting id="reindex" name="reindex" displayName="Reindex music collection" url="/Reindex" class="button"></setting></menuGroup></settings>') % (
+                qa(", ".join(sp.replace("\\", "/") for sp in SHARES)), WPORT)
+    return '<error><detail>unknown settings page</detail></error>'
+def add_share(form):
+    sn = form.get("sharename", ""); NS["user"] = form.get("username", ""); NS["pwlen"] = len(form.get("password", ""))
+    if not re.match(r"^\\\\(.*?)\\(.*)$", sn): return "<error><detail>Share URL must be in the form \\\\computer\\share</detail></error>"
+    if any(x.lower() == sn.lower() for x in SHARES): return "<error><detail>Share already exists</detail></error>"
+    SHARES.append(sn); return "<success/>"
+
 LOOP = [0]
 GRP = set()   # (ip, port) of grouped players (AddSlave/RemoveSlave)
 class H(http.server.BaseHTTPRequestHandler):
@@ -142,6 +192,14 @@ class H(http.server.BaseHTTPRequestHandler):
         u = up.urlparse(self.path); p = u.path; qs = up.parse_qs(u.query, keep_blank_values=True)
         g = lambda k, d=None: qs.get(k, [d])[0]
         x = ""
+        role = self.server.server_port
+        if role == SPORT:
+            if p == "/Settings": return self.reply(settings(g("id", "")))
+            return self.reply("", 404)
+        if role == WPORT:
+            if p == "/sharecfg": return self.redirect(302, "/settings/library/networkShares?noheader=1")
+            return self.reply("", 404)
+        if p == "/Settings": return self.redirect(301, "http://127.0.0.1:%d%s" % (SPORT, self.path))
         if p == "/SyncStatus": x = '<SyncStatus name="Fake Player" modelName="FAKE">%s</SyncStatus>' % "".join('<slave id="%s" port="%s"/>' % s for s in sorted(GRP))
         elif p in ("/AddSlave", "/RemoveSlave"):
             (GRP.add if p == "/AddSlave" else GRP.discard)((g("slave"), g("port", "11000"))); x = '<addSlave/>'
@@ -171,6 +229,10 @@ class H(http.server.BaseHTTPRequestHandler):
                         if S["state"] == "play": setpos(secs()); S["state"] = "pause"
                         bump()
                     threading.Timer(float(g("delay", "0")), fw_pause).start()
+            if "shares" in qs: SHARES[:] = [x for x in g("shares").split("|") if x]
+            if "shareredirect" in qs: NS["redirect"] = int(g("shareredirect"))
+            if "addurl" in qs: NS["addurl"] = "http://127.0.0.1:%d/cp/AddShare" % PORT if g("addurl") == "main" else "/cp/AddShare"
+            if "creds" in qs: x = '<creds user=%s pwlen="%d"/>' % (qa(NS["user"]), NS["pwlen"])
             if "dellog" in qs: x = "<dellog>%s</dellog>" % "".join('<id id="%d"/>' % i for i in DELLOG)
             bump(); x = x or "<ok/>"
         elif p == "/Reindex":
@@ -251,8 +313,30 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Type", "text/xml"); self.send_header("Content-Length", str(len(b))); self.end_headers()
         self.wfile.write(b)
 
+    def reply(self, x, code=200):
+        b = (('<?xml version="1.0" encoding="UTF-8"?>' + x) if x else "").encode()
+        self.send_response(code); self.send_header("Content-Type", "text/xml"); self.send_header("Content-Length", str(len(b))); self.end_headers()
+        self.wfile.write(b)
+    def redirect(self, code, loc):
+        self.send_response(code); self.send_header("Location", loc); self.send_header("Content-Length", "0"); self.end_headers()
+    def do_POST(self):
+        if LOG: LOG.write("POST " + up.urlparse(self.path).path + "\n"); LOG.flush()
+        n = int(self.headers.get("Content-Length", "0")); body = self.rfile.read(n).decode("utf-8", "replace")
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/x-www-form-urlencoded": return self.reply("<error><detail>bad content type</detail></error>", 400)
+        form = dict(up.parse_qsl(body, keep_blank_values=True)); p = up.urlparse(self.path).path; role = self.server.server_port
+        if role == PORT and p == "/cp/AddShare": return self.redirect(301, "http://127.0.0.1:%d/cp/AddShare" % SPORT)
+        if role == SPORT and p == "/cp/AddShare" and NS["redirect"]: NS["redirect"] = 0; return self.redirect(307, "/cp/AddShare2")
+        if role == SPORT and p in ("/cp/AddShare", "/cp/AddShare2"): return self.reply(add_share(form))
+        if role == WPORT and p == "/findremoveshares":
+            if form.get("remove") != "Remove selected shares": return self.reply("<error><detail>no remove button</detail></error>")
+            gone = [k for k, v in form.items() if v == "on"]
+            SHARES[:] = [x for x in SHARES if x not in gone]
+            return self.redirect(302, "/sharecfg?noheader=1")
+        return self.reply("", 404)
+
 class T(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True; allow_reuse_address = True
 
 if __name__ == "__main__":
+    for port in (SPORT, WPORT): threading.Thread(target=T(("127.0.0.1", port), H).serve_forever, daemon=True).start()
     T(("127.0.0.1", PORT), H).serve_forever()

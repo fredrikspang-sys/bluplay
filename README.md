@@ -24,8 +24,10 @@ the player indexes, and who want to pick albums and tracks from a keyboard-drive
 - Shows the stream format of the playing track (e.g. `FLAC 24 bit 96 kHz`) and a progress bar in the (reverse-video) now-playing lines
 - Random mode that keeps the queue topped up with random tracks or albums from the whole library
 - Library reindex with progress (`I`, or `bluplay --reindex`)
+- Network shares: list, add and remove the NAS/PC folders the player indexes (`N`, or `bluplay --shares` to list);
+  BluOS sends share passwords unencrypted on the local network, and bluplay never stores them
 - Play files from the shell: `bluplay FILE|DIR...` queues files that live in the player's library share, or serves other local files to the player over HTTP
-- Scriptable: `--status`, `--queue`, `--reindex`, `--discover`
+- Scriptable: `--status`, `--queue`, `--reindex`, `--shares`, `--discover`
 - Simple multi-room grouping (`G`, or `--group` / `--ungroup`)
 - Finds the player automatically with mDNS/DNS-SD
 - Live updates via BluOS long-polling; handles resizes, slow links and terminals that cannot send Shift+arrows
@@ -90,6 +92,7 @@ bluplay ~/Music/Some\ Album      # play a folder now, then open the player
 bluplay --status                 # one line of player status
 bluplay --queue                  # print the play queue
 bluplay --reindex                # rescan the player's library, with progress
+bluplay --shares                 # list the network shares the player indexes
 bluplay --discover               # list BluOS players found on the network
 bluplay --seek 90                # jump to 1:30 in the current track (--seek +30 / -30: relative)
 bluplay --group 192.0.2.11       # add that player to this player's group (--ungroup removes it)
@@ -229,6 +232,7 @@ Global (both panes):
 | `L` | saved playlists: `Enter` loads one (replaces the queue, asks y/n), `d` deletes one (asks y/n), `Esc` closes |
 | `R` | random mode on/off |
 | `I` | reindex the player's library (asks y/n) |
+| `N` | network shares: `space` marks, `d` removes (asks y/n), `a` adds one (`\\server\share`, user name, password), `I` reindexes, `Esc` closes |
 | `G` | group players: list others on the network, `1`-`9` adds/removes one (see [Multi-room grouping](#multi-room-grouping)) |
 | `?` | help screen (any key closes it) |
 | `Esc` | cancel selection |
