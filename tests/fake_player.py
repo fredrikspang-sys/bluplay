@@ -8,14 +8,16 @@ Implements the subset of the BluOS HTTP API that bluplay uses (/Status with long
 
 Network shares (music library), shaped like a NAD C390 (BluOS 4.18), with invented addresses:
   PORT    /Settings?id=... answers 301 to the settings port (like the real player: 11000 -> 11001);
-          a POST /cp/AddShare here is also answered 301 to the settings port
-  PORT+1  /Settings?id=networkShares|addShare|library, POST /cp/AddShare (sharename, username, password)
+          POST /cp/AddShare (sharename, username, password) is handled here, as on the real player; its errors
+          are <error><message>..</message></error> like the player's
+  PORT+1  /Settings?id=networkShares|addShare|library; POST /cp/AddShare answers 404 (like the real 11001)
           (FAKE_SETTINGS_PORT overrides the port)
   PORT+2  stands in for the player's port 80: POST /findremoveshares (PATH=on&remove=...) answers 302 to /sharecfg
           (FAKE_WEB_PORT overrides the port)
   /_x?shares=PATH1|PATH2 sets the share list (empty: none); /_x?shareredirect=1 makes the next POST /cp/AddShare
-  answer 307 to /cp/AddShare2 (which adds); /_x?addurl=main|rel points the add form at PORT (301 -> re-POST) or
-  back to the relative /cp/AddShare; /_x?creds=1 -> <creds user=".." pwlen="N"/> of the last add.
+  answer 307 to /cp/AddShare2 (which adds); /_x?addurl=main|settings|rel points the add form at PORT, at the
+  settings port (404) or back to the relative /cp/AddShare; /_x?addsharefail=1 makes the next add answer
+  <error><message>Addshare failed</message></error> (a share the player cannot mount); /_x?creds=1 -> <creds user=".." pwlen="N"/> of the last add.
   Passwords are kept only as a length; FAKE_LOG gets request paths, never bodies.
 
 usage: fake_player.py [PORT]            (default 11000)
@@ -145,7 +147,7 @@ def browse(k, q=""):
 
 SPORT = int(os.environ.get("FAKE_SETTINGS_PORT", PORT + 1)); WPORT = int(os.environ.get("FAKE_WEB_PORT", PORT + 2))
 SHARES = ["\\\\10.0.0.5\\Media\\Music", "\\\\nas.example\\Rock & Roll"]
-NS = {"redirect": 0, "user": "", "pwlen": -1, "addurl": "/cp/AddShare"}
+NS = {"redirect": 0, "user": "", "pwlen": -1, "addurl": "/cp/AddShare", "fail": 0}
 SHARE_STYLE = ("<style>\n.heading{font-weight:600;margin:0 0 8px 0;}\n#configshareform{font-family:inherit;color:inherit;}\n"
                "#configshareform input[type=checkbox]{width:18px;height:18px;accent-color:#4a9eff;margin:0;flex:0 0 auto;cursor:pointer;}\n"
                "#configshareform label{cursor:pointer;flex:1;overflow-wrap:break-word;}\n</style>")
@@ -168,7 +170,7 @@ def settings(i):
                 '<setting id="sharename" name="sharename" displayName="Enter share name (as \\\\ComputerName\\share)" class="text" pattern="^\\\\\\\\(.*?)\\\\(.*)$" '
                 'patternError="Share URL must be in the form \\\\computer\\share" requiredError="This field is required." required="true"></setting>'
                 '<setting id="username" name="username" displayName="User name (if required)" class="text"></setting>'
-                '<setting id="password" name="password" displayName="Password (if required)" class="text" style="password"></setting></menuGroup></settings>')
+                '<setting id="password" name="password" displayName="Password (if required)" class="text" style="password"></setting></menuGroup></settings>').replace('url="/cp/AddShare"', 'url="%s"' % escape(NS["addurl"]), 1)
     if i == "library":
         return ('<settings pageId="library" schemaVersion="28"><menuGroup id="library" displayName="Music library">'
                 '<setting id="sharecfg" displayName="Network shares" description=%s><webview url="http://127.0.0.1:%d/sharecfg?noheader=1"></webview></setting>'
@@ -177,8 +179,9 @@ def settings(i):
     return '<error><detail>unknown settings page</detail></error>'
 def add_share(form):
     sn = form.get("sharename", ""); NS["user"] = form.get("username", ""); NS["pwlen"] = len(form.get("password", ""))
-    if not re.match(r"^\\\\(.*?)\\(.*)$", sn): return "<error><detail>Share URL must be in the form \\\\computer\\share</detail></error>"
-    if any(x.lower() == sn.lower() for x in SHARES): return "<error><detail>Share already exists</detail></error>"
+    if not re.match(r"^\\\\(.*?)\\(.*)$", sn): return "<error><message>Share URL must be in the form \\\\computer\\share</message></error>"
+    if any(x.lower() == sn.lower() for x in SHARES): return "<error><message>Share already exists</message></error>"
+    if NS["fail"]: NS["fail"] = 0; return "<error><message>Addshare failed</message></error>"
     SHARES.append(sn); return "<success/>"
 
 LOOP = [0]
@@ -231,7 +234,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     threading.Timer(float(g("delay", "0")), fw_pause).start()
             if "shares" in qs: SHARES[:] = [x for x in g("shares").split("|") if x]
             if "shareredirect" in qs: NS["redirect"] = int(g("shareredirect"))
-            if "addurl" in qs: NS["addurl"] = "http://127.0.0.1:%d/cp/AddShare" % PORT if g("addurl") == "main" else "/cp/AddShare"
+            if "addurl" in qs: NS["addurl"] = {"main": "http://127.0.0.1:%d/cp/AddShare" % PORT, "settings": "http://127.0.0.1:%d/cp/AddShare" % SPORT}.get(g("addurl"), "/cp/AddShare")
+            if "addsharefail" in qs: NS["fail"] = int(g("addsharefail"))
             if "creds" in qs: x = '<creds user=%s pwlen="%d"/>' % (qa(NS["user"]), NS["pwlen"])
             if "dellog" in qs: x = "<dellog>%s</dellog>" % "".join('<id id="%d"/>' % i for i in DELLOG)
             bump(); x = x or "<ok/>"
@@ -324,9 +328,8 @@ class H(http.server.BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", "0")); body = self.rfile.read(n).decode("utf-8", "replace")
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/x-www-form-urlencoded": return self.reply("<error><detail>bad content type</detail></error>", 400)
         form = dict(up.parse_qsl(body, keep_blank_values=True)); p = up.urlparse(self.path).path; role = self.server.server_port
-        if role == PORT and p == "/cp/AddShare": return self.redirect(301, "http://127.0.0.1:%d/cp/AddShare" % SPORT)
-        if role == SPORT and p == "/cp/AddShare" and NS["redirect"]: NS["redirect"] = 0; return self.redirect(307, "/cp/AddShare2")
-        if role == SPORT and p in ("/cp/AddShare", "/cp/AddShare2"): return self.reply(add_share(form))
+        if role == PORT and p == "/cp/AddShare" and NS["redirect"]: NS["redirect"] = 0; return self.redirect(307, "/cp/AddShare2")
+        if role == PORT and p in ("/cp/AddShare", "/cp/AddShare2"): return self.reply(add_share(form))
         if role == WPORT and p == "/findremoveshares":
             if form.get("remove") != "Remove selected shares": return self.reply("<error><detail>no remove button</detail></error>")
             gone = [k for k, v in form.items() if v == "on"]

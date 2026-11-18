@@ -3320,7 +3320,9 @@ static int sh_http(const char *url0, int defport, const char *form, Buf *body, i
         break;
     }
     if (body->p && strstr(body->p, "<error")) {
-        char *d = xml_any_text(body->p, "detail"); if (!d || !*trim(d)) { free(d); d = xml_any_text(body->p, "error"); }
+        char *d = xml_any_text(body->p, "detail");                     /* most calls: <error><detail> */
+        if (!d || !*trim(d)) { free(d); d = xml_any_text(body->p, "message"); }   /* /cp/AddShare: <error><message> */
+        if (!d || !*trim(d)) { free(d); d = xml_any_text(body->p, "error"); }
         char *t = d ? trim(d) : NULL;
         int r = fail("the player said: %s", t && *t ? t : "error"); free(d); return r;
     }
@@ -3402,7 +3404,9 @@ static int ns_add(NetShares *s, const char *path, const char *user, char *pass) 
     bputc(&f, '&'); urlq(&f, s->f_user, NULL, 1); bputc(&f, '='); urlq(&f, user, NULL, 1);
     bputc(&f, '&'); urlq(&f, s->f_pass, NULL, 1); bputc(&f, '='); urlq(&f, pass, NULL, 1);
     wipe(pass, strlen(pass));
-    Buf b = {0}; int r = sh_http(s->addurl, s->port ? s->port : player_port(), f.p, &b, NULL);
+    /* /Settings comes from 11001, but the add form's relative URL is handled on the API port (a NAD C390 answers
+       404 for /cp/AddShare on 11001), so it is resolved against the player's own port */
+    Buf b = {0}; int r = sh_http(s->addurl, player_port(), f.p, &b, NULL);
     wipe(f.p, f.cap); bfree(&f); bfree(&b); return r;
 }
 static int ns_remove(NetShares *s) {
