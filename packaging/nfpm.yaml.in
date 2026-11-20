@@ -11,7 +11,7 @@ description: |
   Minimalistic terminal music player for BluOS streamers.
   Keyboard-driven TUI that talks to a BluOS player (Bluesound, NAD, ...)
   over its HTTP API: browse the local music library and manage the queue.
-vendor: "Fredrik Spang"
+vendor: "fredrikspang-sys"
 homepage: https://github.com/fredrikspang-sys/bluplay
 license: MIT
 contents:
